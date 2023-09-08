@@ -1,53 +1,45 @@
 ---
-title: "Lab 1 - Learning Tidy R With Census Data"
-author: "Michael Fichman & Matt Harris"
+title: "Tidycensus Markdown"
+author: "Shengqian Wang"
+date: '09/08/2023'
 output:
   html_document:
     toc: true
     toc_float: true
+    number_sections: false
+    code_folding: hide
 ---
 
-```{r setup, include=FALSE, cache = TRUE}
-knitr::opts_chunk$set(echo = TRUE)
+## Introduction
 
-library(tidyverse)
-library(knitr)
-library(kableExtra)
-library(rmarkdown)
+
+#### Setup 
+
+```{r setup_packages1, warning = FALSE, eval = FALSE,message=FALSE,echo=FALSE}
+install.packages('tidyverse')
+install.packages('tidycensus')
+install.packages('sf')
+install.packages("kableExtra")
+devtools::install_github("haozhu233/kableExtra")
 ```
 
-# Introduction
 
-This tutorial will introduce you to the use of R for US Census data. This code uses the `tidycensus` package to query the US Census Bureau's Application Programming Interface (API). An API is, roughly, a "place" on the internet which you can interact with using a computer program. In our case, we will interact with an API which allows us access to US Census Data - this is the same data library that the Census' own website uses.
-
-Perhaps more importantly, this tutorial introduces you to the `tidyverse` world of libraries - the best data wrangling, summarizing and visualizing tools available in R. These packages are designed to "play nice" with each other - none of them use the same function names and they are maintained together by a team of developers to make sure they work well.
-
-R Studio publishes handy "cheat sheets" for popular R libraries, including [data wrangling in the tidyverse](https://www.rstudio.com/wp-content/uploads/2015/02/data-wrangling-cheatsheet.pdf). 
-
-This exercise consists of a few classic planner's tasks:
-
-1. Collecting and manipulating census data
-
-2. Measuring demographic change over time for a given geography
-
-3. Measuring statistics for a geography relative to a parent geography
-
-4. Creating summary statistics regarding demographics for a collection of geographies
-
-# Setup 
 ```{r setup_packages2, warning = FALSE, message = FALSE}
 library(tidyverse)
 library(tidycensus)
 library(sf)
+library(kableExtra)
+library(knitr)
+library(rmarkdown)
 ```
 
-## Census API Key
+#### Census API Key
 
 ```{r load_key, warning = FALSE, eval = FALSE}
 census_api_key("5c7b1ebb206012789759942ddf1acbb882f937ad", overwrite = TRUE)
 ```
 
-## Load census data dictionaries
+#### Load census data dictionaries
 
 ```{r load_variables, cache = TRUE}
 
@@ -61,9 +53,9 @@ acs_variable_list.2016 <- load_variables(2016, #year
 ```
 
 
-# Downloading Data from Tidycensus
+## Downloading Data from Tidycensus
 
-## Create a vector of census variables
+#### Create a vector of census variables
 
 ```{r acs_vars}
 acs_vars <- c("B01001_001E", # ACS total Pop estimate
@@ -74,7 +66,7 @@ acs_vars <- c("B01001_001E", # ACS total Pop estimate
               "B06009_006E") # Total graduate or professional degree
 ```
 
-## Call the Census API to get tract level data for 2020 for all of Philadelphia
+#### Call the Census API to get tract level data for 2020 for all of Philadelphia
 
 ```{r get_acs_2020, cache = TRUE, message = FALSE, warning = FALSE}
 acsTractsPHL.2020 <- get_acs(geography = "tract",
@@ -86,9 +78,9 @@ acsTractsPHL.2020 <- get_acs(geography = "tract",
                              output = "wide") 
 ```
 
-# Wrangling Data with dplyr
+## Wrangling Data with dplyr
 
-## Mutating, selecting and renaming variables
+#### Mutating, selecting and renaming variables
 
 ```{r do_some_dplyr, cache = TRUE}
 acsTractsPHL.2020 <- acsTractsPHL.2020 %>%
@@ -126,20 +118,14 @@ acsTractsPHL.2016 <- get_acs(geography = "tract",
          pctWhite.2016 = total_White.2016/total_pop.2016)
 ```
 
-## Joining data
-
-We can do a tabular join - each of our census dataframes should have a unique ID for each tract. You need to join columns that consist of the same type of data. Using hte `glimpse` command can give you a quick overview of the data types for each column in your data set. Recall that joining character to numeric data is going to be a no-go.
-
-There are four kinds of joins - you can learn about them here: https://rpubs.com/williamsurles/293454
-
-We are going to do a "left join," keeping all the observations from the left hand side of the join argument, and only those which match from the right. Ideally this consists of all of the observations from the right hand side considering we have the same geometries in 2016 and 2020.
+#### Joining data
 
 ```{r left_join_tracts, cache = TRUE}
 allACS <- left_join(acsTractsPHL.2016, acsTractsPHL.2020,
                     by= c("GEOID"))
 ```
 
-## Doing column math using mutate
+#### Doing column math using mutate
 
 ```{r do_mutates, cache = TRUE}
 allACS <- allACS %>%
@@ -148,49 +134,33 @@ allACS <- allACS %>%
 
 ```
 
-## Exercise - Creating New Variables
+#### Exercise - Creating New Variables
 
-Use the `mutate` command to create three new variables in your allACS data set. These variables can either be measures of change or proportions/percentages.
+## Summarizing Census Data
 
-If you want, you can put some new variables in your ACS data sets by adding to `acs_vars` - just make sure you put something in the `rename` commands we used earlier if you want to have intelligible variable names.
+#### Exploring central tendancies
 
-# Summarizing Census Data
-
-## Exploring central tendancies
-
-```{r base_r_summaries_NA_example, cache = TRUE}
+```{r base_r_summaries_NA_example, cache = TRUE, message = FALSE}
 mean(allACS$change_med_HH_Income)
 ```
 
-OK, let's try it again, using a workaround. Can you think of some reasons why omitting NA data might be problematic?
-
-```{r base_r_summaries_NA_rm, cache = TRUE}
+```{r base_r_summaries_NA_rm, cache = TRUE, message = FALSE}
 mean(allACS$change_med_HH_Income, na.rm = TRUE)
 
 median(allACS$change_med_HH_Income, na.rm = TRUE)
 ```
 
-## Exploring distributions
-
-Base R has a graphics package - we can look at the distribution of the data, instead of just the central tendencies (e.g. `mean` and `median`).
+#### Exploring distributions
 
 ```{r basic_histogram, cache = TRUE}
 hist(allACS$change_med_HH_Income)
 ```
-
-We can also use the dynamic graphics package from the tidyverse, `gglot2` to make some more detailed histograms. We have lots of aesthetic options here.
-
-Make your own by changing the terms in the ggplot call - use a different variable and change the axis titles. You see we can build a nice plot with different elements using building blocks like `geom_histogram`.
-
-Notice that the `+` sign does the same work in ggplot that the `%>%` does in tidy code.
 
 ```{r ggplot_histogram_simple, warning = FALSE, cache = TRUE, message = FALSE}
 ggplot(allACS) +
   geom_histogram(aes(change_med_HH_Income))
   
 ```
-
-Let's make this a bit more complex, and add some labels.
 
 ```{r ggplot_histogram, warning = FALSE, cache = TRUE}
 ggplot(allACS)+
@@ -203,11 +173,8 @@ ggplot(allACS)+
   
 ```
 
-Wow, there are some tracts with a huge increase in Med HH Income! What is the simplest explanation for that?
 
-## Making a summary table
-
-The `summarize` function from the `dplyr` library is very powerful - you can use these summary functions in the context of a table - this is akin to "pivot tables" and other tools from Excel - but this is incredibly simple. You could create a table of statistics and easily export it for use in a report.
+#### Making a summary table
 
 ```{r summaryTable, cache = TRUE}
 summaryTable <- allACS %>%
@@ -216,15 +183,9 @@ summaryTable <- allACS %>%
 ```
 
 
-# Comparing geographies
+### Comparing geographies
 
-Let's say you are a planner working for the City, and you are creating a neighborhood plan for a particular neighborhood. Our example neighborhood will be Mt. Airy, in Philadelphia's Northwest section.
 
-Let's start by making a vector that has the GEOIDs of census tracts in Mt. Airy. The allACS$GEOID column is a CHARACTER, not a number, athough it appears numeric.
-
-We can then create a vactor variable, which we call `mtAiry`, using a "boolean" statement.
-
-We say that if a tract has a GEOID in `myTracts`, the variable `mtAiry` should take on a value of "MT AIRY", or else it takes on a value of "REST OF PHILADELPHIA"
 
 ```{r myTracts, cache = TRUE}
 
@@ -241,12 +202,6 @@ allACS <- allACS %>%
   mutate(mtAiry = ifelse(GEOID %in% myTracts, "MT AIRY", "REST OF PHILADELPHIA"))
 ```
 
-Let's make a new summary table, this time accounting for the statistics for both Mt. Airy and the rest of the city. 
-
-We can see that city-wide, "on average" the mean tract income level increased, while the median level decreased. Why might this be?
-
-We had the opposite dynamic in Mt. Airy, where median household income per tract rose, while mean income fell.
-
 ```{r summary_table_2, cache = TRUE, message = FALSE, warning = FALSE}
 summaryTable2 <- allACS %>%
   group_by(mtAiry) %>%
@@ -254,13 +209,9 @@ summaryTable2 <- allACS %>%
             med_change_HH_Income = median(change_med_HH_Income, na.rm = TRUE))
 ```
 
-## Graphic comparisons Using ggplot2
+#### Graphic comparisons Using ggplot2
 
-A graphical approach to subdividing and summarizing the data might make this easier to figure out.
 
-We could compare the distributions between Mt. Airy and the City by taking our histogram we created earlier and using the `facet_wrap` option to subdivide the data and create a side-by-side comparison.
-
-What can we see here about the distributions of the data, and how the distribution and the central tendencies might tell us different stories about what's happening?
 
 ```{r ggplot_histogram_2, warning = FALSE, cache = TRUE}
 ggplot(allACS)+
@@ -275,15 +226,6 @@ ggplot(allACS)+
   
 ```
 
-We can create a scatterplot to see what the relationship is between 2016 and 2020 income and where our Mt. Airy tracts fall.
-
-Notice how we put the inflation adjustment right in the `geom_point` call - you can temporarily create new data inside your ggplot diagrams!
-
-I set a `fill` parameter to differentiate between our factor levels in the data.
-
-I add a line that represents y=x using `geom_abline`.
-
-What do you think this line represents? How does it help us interpret these points we are seeing?
 
 ```{r ggplot_point1, warning = FALSE, cache = TRUE}
 ggplot(allACS)+
@@ -300,16 +242,9 @@ ggplot(allACS)+
   
 ```
 
-There are very well established correlations between socio-demographic characteristics and wealth in the US. Philadelphia is no exception. A simple scatterplot is stark evidence of this correlation. 
-
-We can plot a `geom_smooth` trendline in here using the `method = "lm"` e.g. a linear fit to see. The default for `geom_smooth` is much more wiggly and may not be the best for visuals like this.
-
-How do our tracts in Mt. Airy look in the context of distribution of wealth and relative to the trend line?
-
-If you plot these data for 2020, do they look different?
 
 
-```{r ggplot_point2, warning = FALSE, cache = TRUE, message = FALSE}
+```{r ggplot_point4, warning = FALSE, cache = TRUE, message = FALSE}
 ggplot(allACS)+
   geom_point(aes(x = 100* pctWhite.2020, 
                  y = med_HH_Income.2020,
@@ -325,6 +260,83 @@ ggplot(allACS)+
     y="Med HH Income 2020 ($)")
   
 ```
+
+# Homework part
+## Part.1 City-wide - number of vacant housing units per tract changing
+
+```{r ggplot_point3, warning = FALSE, cache = TRUE,class.source = 'fold-show', message = FALSE}
+ggplot(allACS)+
+  geom_point(aes(x =total_vacant.2016, 
+                 y = total_vacant.2020,
+                 color = mtAiry))+
+  geom_abline(intercept = 0, slope = 1)+
+  labs(
+    title = "2020 Number of VH as a Function of 2016 Number of VH",
+    subtitle = " ",
+    caption = "Data: US Census Bureau, ACS 5-year estimates",
+    x="Num. vacant housing units per tract 2016", 
+    y="Num. vacant housing units per tract 2020")
+```
+Overall, the number of vacancies in most tracts has not changed significantly compared to 2016, however, more tracts show a decrease in the number of vacancies like the Mt Airy area, which may indicate a potential increase in urban vitality.
+
+## Part.2 Number of vacant housing units in 2016 as a percentage of total housing units
+
+```{r spatial_tidycensus_PCTVH, warning=FALSE, cache=TRUE,message = FALSE,results = FALSE}
+acsTractsPHL.2016.sf <- get_acs(geography = "tract",
+                             year = 2016, 
+                             variables = acs_vars, 
+                             geometry = TRUE, 
+                             state = "PA", 
+                             county = "Philadelphia", 
+                             output = "wide") %>% 
+  dplyr::select (GEOID, NAME, all_of(acs_vars)) %>%
+  rename (total_pop.2016 = B01001_001E,
+          total_HU.2016 = B25002_001E,
+          total_vacant.2016 = B25002_003E,
+          med_HH_Income.2016 = B19013_001E,
+          total_White.2016 = B02001_002E,
+          total_GradDeg.2016 = B06009_006E) %>%
+  mutate(pctvh.2016= total_vacant.2016/total_HU.2016) %>%
+  mutate(mtAiry = ifelse(GEOID %in% myTracts, "MT AIRY", "REST OF PHILADELPHIA")) %>%
+  st_as_sf(crs = 4326) # Turn shp into sf object and project as WGS84
+```
+
+```{r ggplot_geom_sf0, warning = FALSE, cache = TRUE}
+ggplot()+
+  geom_sf(data = acsTractsPHL.2016.sf, aes(fill = pctvh.2016),
+          color = "transparent")+
+  scale_fill_gradient(low = "#B3FFFF", high = "#CC0052") +
+  geom_sf(data = acsTractsPHL.2016.sf %>%
+            filter(mtAiry == "MT AIRY") %>%
+            st_union(),
+          color = "Black",
+          fill = "transparent")+
+  labs(
+    title = "Percentage of Vacant Housing Unites by tract",
+    subtitle = "",
+    caption = "Data: US Census Bureau, ACS 5-year estimates")
+  
+```
+
+Philadelphia has a large number of vacant buildings, especially near the center; but the problem is relatively less severe in Mt Airy.
+
+## Part.3 A table showing a summary of mean number of vacant housing units per tract
+
+```{r spatial_tidycensus_VH, message=FALSE, warning=FALSE, cache=TRUE}
+summaryTable3 <- allACS %>%
+  group_by(mtAiry) %>%
+  summarize(Average_VH_Per_Tract = mean(total_vacant.2020, na.rm = TRUE))
+
+```
+
+
+```{r kable_rendering, message=FALSE, warning=FALSE, cache=TRUE}
+summaryTable3%>%
+  kbl(caption = "Mean. Vacant housing units per tract") %>%
+  kable_classic("hover", full_width = F) %>%
+  column_spec(2, color = spec_color(mtcars$mpg[6:9]))
+```
+
 
 # Spatial Data and Tidycensus
 
@@ -357,26 +369,6 @@ acsTractsPHL.2020.sf <- get_acs(geography = "tract",
   st_as_sf(crs = 4326) # Turn shp into sf object and project as WGS84
 ```
 
-```{r spatial_tidycensus_no_eval, message=FALSE, warning=FALSE, cache=TRUE, eval = FALSE}
-acsTractsPHL.2020.sf <- get_acs(geography = "tract",
-                             year = 2020, 
-                             variables = acs_vars, 
-                             geometry = TRUE, 
-                             state = "PA", 
-                             county = "Philadelphia", 
-                             output = "wide") %>% 
-  dplyr::select (GEOID, NAME, all_of(acs_vars)) %>%
-  rename (total_pop.2020 = B01001_001E,
-          total_HU.2020 = B25002_001E,
-          total_vacant.2020 = B25002_003E,
-          med_HH_Income.2020 = B19013_001E,
-          total_White.2020 = B02001_002E,
-          total_GradDeg.2020 = B06009_006E) %>%
-  mutate(vacancyPct.2020 = total_vacant.2020/total_HU.2020,
-         pctWhite.2020 = total_White.2020/total_pop.2020) %>%
-  mutate(mtAiry = ifelse(GEOID %in% myTracts, "MT AIRY", "REST OF PHILADELPHIA")) %>%
-  st_as_sf(crs = 4326) # Turn shp into sf object and project as WGS84
-```
 
 Now we can create a a `geom_sf` which will allow you to map `sf` objects in `ggplot2` so long as they are have their projection set to WGS84 (aka web mercator). You can see above that we took the shapefile created by the tidycensus call and used the `st_as_sf` call to turn it into an `sf` object and set the `crs` (coordinate reference system) to `4326`, which is the code for WGS84. You can find all these kinds of codes at [spatialreference.org](http://spatialreference.org).
 
