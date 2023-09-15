@@ -52,7 +52,7 @@ source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-L
 ## Load Census API Key
 
 ```{r load_api_key, message=FALSE, warning=FALSE}
-census_api_key("YOUR API KEY", overwrite = TRUE)
+census_api_key("5c7b1ebb206012789759942ddf1acbb882f937ad", overwrite = TRUE)
 ```
 
 # Load the data
