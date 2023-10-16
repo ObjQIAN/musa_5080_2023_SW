@@ -1,0 +1,474 @@
+---
+title: "Washinton DC"
+author: "Shengqian Wang"
+date: '2023/09/08'
+output: 
+  html_document:
+   code_folding: hide
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE,message = FALSE)
+```
+
+## Introduction:
+
+This brief analyzes the significant shifts in various socio-economic indicators within Transit-Oriented Development (TOD) areas in Washington, D.C. between 2000 and 2020. By understanding these shifts, we can better equip ourselves to address challenges and capitalize on opportunities in future urban planning endeavors.
+
+```{r setup_packages, warning = FALSE, message = FALSE}
+# Load Libraries
+
+library(tidyverse)
+library(tidycensus)
+library(sf)
+library(kableExtra)
+
+options(scipen=999)
+options(tigris_class = "sf")
+
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
+palette5 <- c("#f0f9e8","#bae4bc","#7bccc4","#43a2ca","#0868ac")
+```
+
+```{r load_key, warning = FALSE, eval = FALSE}
+census_api_key("5c7b1ebb206012789759942ddf1acbb882f937ad", overwrite = TRUE)
+```
+
+```{r results='hide', warning = FALSE, message = FALSE}
+
+acs_variable_list.2000 <- load_variables(2000, #year
+                                         "sf1", #decennial data
+                                         cache = TRUE)
+acs_variable_list.2000x <- load_variables(2000, #year
+                                         "sf3", #decennial data
+                                         cache = TRUE)
+```
+```{r}
+acs_variable_list.2016 <- load_variables(2016, #year
+                                         "acs5", #acs 5 year
+                                         cache = TRUE)
+```
+```{r results='hide'}
+tracts00 <-  
+  get_decennial(geography = "tract",
+                sumfile = c('sf3'),
+          variables= c('HCT009001',
+                        "H009002","PCT025050",
+                        "PCT025009",
+                        "P053001", "H056001",
+                        "PCT051002"), 
+          year=2000, state=11,
+          geometry=TRUE) %>% 
+  st_transform('ESRI:102685')
+```
+
+
+```{r}
+totalPop00 <-
+  tracts00 %>%
+  filter(variable == "HCT009001")
+```
+
+
+```{r}
+# Let's "spread" the data into wide form
+
+tracts00 <- 
+  tracts00 %>%
+  dplyr::select( -NAME) %>%
+  spread(key = variable, value = value) %>%
+  rename(TotalPop = HCT009001, 
+         Whites = H009002,
+         FemaleBachelors = PCT025050, 
+         MaleBachelors = PCT025009,
+         MedHHInc = P053001, 
+         MedRent = H056001,
+         TotalPoverty = PCT051002)
+
+
+tracts00 <- 
+  tracts00 %>%
+  mutate(pctWhite = ifelse(TotalPop > 0, Whites / TotalPop, 0),
+         pctBachelors = ifelse(TotalPop > 0, ((FemaleBachelors + MaleBachelors) / TotalPop), 0),
+         pctPoverty = ifelse(TotalPop > 0, TotalPoverty / TotalPop, 0),
+         year = "2000") %>%
+  dplyr::select(-Whites,-FemaleBachelors,-MaleBachelors,-TotalPoverty)
+```
+
+
+```{r results='hide', warning = FALSE, message = FALSE}
+tracts20 <- 
+  get_acs(geography = "tract", 
+          variables = c("B25026_001E","B02001_002E",
+                        "B15001_050E","B15001_009E",
+                        "B19013_001E","B25058_001E",
+                        "B06012_002E"), 
+          year=2020, state=11, 
+          geometry=TRUE, output="wide") %>%
+  st_transform('ESRI:102685') %>%
+  rename(TotalPop = B25026_001E, 
+         Whites = B02001_002E,
+         FemaleBachelors = B15001_050E, 
+         MaleBachelors = B15001_009E,
+         MedHHInc = B19013_001E, 
+         MedRent = B25058_001E,
+         TotalPoverty = B06012_002E) %>%
+  dplyr::select(-NAME, -starts_with("B")) %>%
+  mutate(pctWhite = ifelse(TotalPop > 0, Whites / TotalPop,0),
+         pctBachelors = ifelse(TotalPop > 0, ((FemaleBachelors + MaleBachelors) / TotalPop),0),
+         pctPoverty = ifelse(TotalPop > 0, TotalPoverty / TotalPop, 0),
+         year = "2020") %>%
+  dplyr::select(-Whites, -FemaleBachelors, -MaleBachelors, -TotalPoverty) 
+```
+
+
+
+```{r}
+allTracts <- rbind(tracts00,tracts20)
+```
+
+
+```{r, warning = FALSE, message = FALSE}
+wm <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Transportation_Rail_Bus_WebMercator/MapServer/52/query?outFields=*&where=1%3D1&f=geojson")
+# read all DC stops 
+wm_lines <- st_read('https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Transportation_Rail_Bus_WebMercator/MapServer/58/query?outFields=*&where=1%3D1&f=geojson') %>% st_transform(st_crs(tracts00)) %>% st_intersection(tracts00)
+
+wmStops <- wm %>%
+ dplyr::select(NAME, LINE) %>%
+  st_transform(st_crs(tracts00))
+#select only names and lines, and then reproject the data
+```
+
+```{r}
+
+ggplot() + 
+  geom_sf(data=tracts00, alpha = 0.7) +
+  geom_sf(data=wm_lines, 
+          aes(colour = NAME),lwd = 1) +
+  scale_colour_manual( values=c("blue","#009919","#ffc400","red","white","yellow"))+
+  geom_sf(data=wmStops, 
+          show.legend = "point", size= 1) +
+  labs(title="Washington D.C. Metro Map", 
+       subtitle="A map showing metro stations and lines", 
+       caption="Figure 1") +
+  mapTheme()
+
+```
+First I plot all DC metro Stops and Lines, with the context of Washington DC census tracts.
+
+
+```{r}
+
+stopBuffer <- st_buffer(wmStops, 2640)
+
+stopUnion <- st_union(st_buffer(wmStops, 2640))
+
+wmBuffers <- 
+  rbind(
+     stopBuffer %>%
+      mutate(Legend = "Buffer") %>%
+      dplyr::select(Legend),
+     stopUnion %>%
+      st_sf() %>%
+      mutate(Legend = "Unioned Buffer"))
+```
+
+
+```{r}
+ggplot() +
+  geom_sf(data=wmBuffers) +
+  geom_sf(data=wmStops, show.legend = "point") +
+  facet_wrap(~Legend) + 
+  labs(caption = "Figure 2.6") +
+  mapTheme()
+```
+To analyse the change and demographics in the TOD area, a 0.5 mile buffer is made for analysis.
+
+```{r}
+buffer <- filter(wmBuffers, Legend=="Unioned Buffer")
+```
+
+
+```{r}
+clip <- 
+  st_intersection(buffer, tracts00) %>%
+  dplyr::select(TotalPop) %>%
+  mutate(Selection_Type = "Clip")
+```
+
+
+
+```{r spatialSelection}
+
+# Do a spatial selection to see which tracts touch the buffer
+
+# approach #1: sub-setting a spatial object with a spatial object using the '[' brackets.
+selection1 <- 
+  tracts00[buffer,] %>%
+  dplyr::select(TotalPop) %>%
+  mutate(Selection_Type = "Spatial Selection")
+
+# approach #2: using `st_intersects` as a verbose way to do approach #1
+selection2 <- tracts00[st_intersects(tracts00, buffer) %>% lengths > 0, ] %>%
+  dplyr::select(TotalPop) %>%
+  mutate(Selection_Type = "Spatial Selection")
+
+# approach #3: use `st_join` to do a spatial join and remove the non-intersecting polygons
+selection3 <- tracts00 %>% 
+  st_join(buffer, join = st_intersects) %>% 
+  filter(!is.na(Legend)) %>% 
+  dplyr::select(TotalPop) %>%
+  mutate(Selection_Type = "Spatial Intersects")
+```
+
+
+
+```{r}
+selectCentroids <-
+  st_centroid(tracts00)[buffer,] %>%
+  st_drop_geometry() %>%
+  left_join(., dplyr::select(tracts00, GEOID), by = "GEOID") %>%
+  st_sf() %>%
+  dplyr::select(TotalPop) %>%
+  mutate(Selection_Type = "Select by Centroids")
+```
+
+
+```{r}
+intersections <- rbind(clip, selection1, selectCentroids)
+
+ggplot() +
+  geom_sf(data=intersections, aes(fill = TotalPop)) +
+  geom_sf(data=wmStops, show.legend = "point") +
+  scale_fill_viridis_c() +
+  facet_wrap(~Selection_Type) + 
+  mapTheme()
+```
+
+Here is the difference between three mathod of spatial clip, and I chose the centroids method, which can represent the nature of nearby area but not too large.
+
+```{r}
+allTracts.group <- 
+  rbind(
+    st_centroid(allTracts)[buffer,] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "TOD"),
+    st_centroid(allTracts)[buffer, op = st_disjoint] %>%
+      st_drop_geometry() %>%
+      left_join(allTracts) %>%
+      st_sf() %>%
+      mutate(TOD = "Non-TOD")) %>%
+  mutate(MedRent.inf = ifelse(year == "2000", MedRent * 1.50, MedRent))  %>%
+  mutate(MedHHInc.inf = ifelse(year == "2000", MedHHInc * 1.50, MedHHInc)) 
+
+```
+## Key Findings:
+```{r}
+allTracts.group %>%  
+    ggplot() +
+    geom_sf(aes(fill = q5(MedHHInc.inf))) +
+    geom_sf(data = stopUnion, fill = "transparent", color = "white")+
+    geom_sf(data = wm)+
+    labs(title = "Median Household Income", 
+         subtitle = "Median Household Income in Washington DC 2000 and 2020") +
+    scale_fill_manual(values = palette5,labels = qBr(allTracts.group, "MedHHInc.inf"),name = "MedHHInc") +
+    facet_wrap(~year)+
+    mapTheme()
+```
+Rising Average Household Income: There has been a marked increase in the average household income within TOD areas between 2000 and 2020. This rise suggests a trend of more affluent residents moving into or choosing to stay in these areas.
+
+```{r}
+allTracts.group %>%  
+    ggplot() +
+    geom_sf(aes(fill = q5(MedRent.inf))) +
+    geom_sf(data = stopUnion, fill = "transparent", color = "white")+
+    geom_sf(data = wm)+
+    labs(title = "Median Rent", 
+         subtitle = "Median Rent in Washington DC 2000 and 2020") +
+    scale_fill_manual(values = palette5,labels = qBr(allTracts.group, "MedRent.inf"),name = "MedRent") +
+    facet_wrap(~year)+
+    mapTheme()
+```
+
+Increased Average Rent: Besides the rising trend in household income, there's also been a similar surge in rent. This can indicate both the demand for housing in these areas and potential gentrification. This happens especially in the center city area. It could also be a result of the end of suburb movement.
+
+
+```{r}
+allTracts.group %>%  
+    ggplot() +
+    geom_sf(aes(fill = q5(pctPoverty))) +
+    geom_sf(data = stopUnion, fill = "transparent", color = "white")+
+    geom_sf(data = wm)+
+    labs(title = "Poverty Percentage", 
+         subtitle = "Total Poverty Percentage in Washington DC 2000 and 2020") +
+    scale_fill_manual(values = palette5,labels = qBr(allTracts.group, "pctPoverty"),name = "pctPoverty") +
+    facet_wrap(~year)+
+    mapTheme()
+```
+Decrease in Poverty Levels: There's been a reduction in poverty levels, as evidenced by the decline in the percentage of residents living below the poverty line. It could be a reason or result of the increased rent and household income.
+
+```{r}
+allTracts.group %>%  
+    ggplot() +
+    geom_sf(aes(fill = q5(pctBachelors))) +
+    geom_sf(data = stopUnion, fill = "transparent", color = "white")+
+    geom_sf(data = wm)+
+    labs(title = "Bachelor Percentage", 
+         subtitle = "Total Bachelor Percentage in Washington DC 2000 and 2020") +
+    scale_fill_manual(values = palette5,labels = qBr(allTracts.group, "pctBachelors"),name = "pctBachelor") +
+    facet_wrap(~year)+
+    mapTheme()
+```
+
+
+Higher Education Levels: The percentage of residents with a bachelor's degree has risen considerably. This trend further reinforces the theory of a demographic shift towards a more educated populace in TOD areas. But it could also because of the shift in time (2000-2020)
+
+
+### TOD Indicator Tables
+
+```{r}
+allTracts.Summary <- 
+  st_drop_geometry(allTracts.group) %>%
+  group_by(year, TOD) %>%
+  summarize(Rent = mean(MedRent.inf, na.rm = T),
+            #Population = mean(TotalPop, na.rm = T),
+            #Percent_White = mean(pctWhite, na.rm = T),
+            Percent_Bach = mean(pctBachelors, na.rm = T),
+            Percent_HH = mean(MedHHInc.inf, na.rm = T),
+            Percent_Poverty = mean(pctPoverty, na.rm = T))
+
+
+```
+
+Let's make some comparisons and speculate about the social demographics in these areas 2000-2020 
+
+```{r}
+allTracts.Summary %>%
+  unite(year.TOD, year, TOD, sep = ": ", remove = T) %>%
+  gather(Variable, Value, -year.TOD) %>%
+  mutate(Value = round(Value, 2)) %>%
+  spread(year.TOD, Value) %>%
+  kable() %>%
+  kable_styling() %>%
+  footnote(general_title = "\n",
+           general = "Above indicators'summary in Table(after inflation)")
+```
+
+
+### TOD Indicator Plots
+
+I created small multiple plots using the "gather" command. Comparing to the table and seperated images, we can see the change instantly from this plot.
+
+```{r}
+allTracts.Summary %>%
+  gather(Variable, Value, -year, -TOD) %>%
+  ggplot(aes(year, Value, fill = TOD)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~Variable, scales = "free", ncol=5) +
+  scale_fill_manual(values = c("#bae4bc", "#0868ac")) +
+  labs(title = "Indicator differences across time and space") +
+  plotTheme() + theme(legend.position="bottom")
+```
+I created small multiple plots using the "gather" command. Comparing to the table and seperated images, we can see the change instantly from this plot.
+
+```{r}
+sXs <-
+  st_centroid(allTracts.group)[buffer,] %>%
+  st_drop_geometry() %>%
+  left_join(., dplyr::select(allTracts.group, GEOID), by = "GEOID") %>%
+  st_sf() %>%
+  dplyr::select(TotalPop,year,MedRent.inf,)
+```
+
+
+```{r}
+pt_sym <-
+  wmStops %>%
+  dplyr::select(NAME) %>%
+  st_intersection(sXs) %>%
+  group_by(NAME,year) %>% 
+  summarise(rent = mean(MedRent.inf),
+            population = mean(TotalPop))
+
+pt_sym %>%
+  ggplot() + 
+  geom_sf(data = allTracts.group) +
+  geom_sf(aes(size = population), fill = 'orange',pch = 21) +  
+  facet_wrap(~year)+
+  labs(title = "Population within 0.5 miles of Transit Stations") + 
+  mapTheme()
+  scale_size(range = c(2, 10))
+```
+The evident increase in population near transit stations underscores the rising preference for transit-oriented living, emphasizing the need for enhanced public transit services and supportive infrastructure.
+```{r}
+pt_sym %>%
+  ggplot() + 
+  geom_sf(data = allTracts.group) +
+  geom_sf(aes(size = rent), fill = 'orange',pch = 21) +  
+  facet_wrap(~year)+
+  labs(title = "Rent within 0.5 miles of Transit Stations(after inflation)") + 
+  mapTheme()
+  scale_size(range = c(2, 10))
+```
+
+The uptick in rent suggests that the areas around transit stations are becoming more desirable, possibly leading to potential gentrification concerns and challenges for long-term residents facing affordability issues.
+
+```{r}
+allTracts <- rbind(tracts20,tracts00)
+wm_MRB <- multipleRingBuffer(st_union(wmStops), 26400, 2640)
+
+allTracts.rings <-
+  st_join(st_centroid(dplyr::select(allTracts, GEOID, year)),
+          wm_MRB) %>%
+  st_drop_geometry() %>%
+  left_join(dplyr::select(allTracts, GEOID, MedRent, year), 
+            by=c("GEOID"="GEOID", "year"="year")) %>%
+  st_sf() %>%
+  mutate(distance = distance / 5280) #convert to miles
+
+
+
+  ggplot() +
+    geom_sf(data=wm_MRB) +
+    geom_sf(data=wmStops, size=1) +
+    geom_sf(data=st_union(tracts20), fill=NA, size=1.2) +
+    labs(title="Half mile buffers") +
+    mapTheme()
+
+```
+A multiple Ring Buffer is created to analyze the change in rent as the distance varies.
+```{r}
+TES <- st_intersection(allTracts.group,allTracts.rings) %>%
+  drop_na() %>%
+  group_by(distance,year) %>% 
+  summarise(rent = mean(MedRent.inf))
+
+  
+```
+```{r}
+ggplot(data = TES)+
+  geom_line(aes(distance, rent, colour = year))+
+  labs(title = "Rent as a function of distance to subway stations)",subtitle="census tract",
+       xlab("My x label"),
+       ylab("My y label")) 
+
+```
+This is a graph of rent as a function of distance. The rent in 2020 has increased a lot compared to 2000, and the TOD area is known as the most expensive place; and there is another price increase within 2-3 miles away from the subway. This picture may seem counter-intuitive at first, but considering the gentrification of estates in the DMV suburb, it all makes sense.
+
+## Recommendations:
+
+Affordable Housing Initiatives: Invest in and promote affordable housing projects to ensure that TOD areas remain accessible to everyone. Implementing rent control measures or offering incentives for developers to create mixed-income housing can be effective strategies.
+
+Enhance Public Services: Investing in public services such as education, healthcare, and recreational facilities can ensure balanced development.
+
+Infrastructure Development: Strengthen public transportation and other essential infrastructures to support the growing population and their needs.
+
+Job market: Introduce programs that help create job opportunity around TOD area, ensuring low income community remain competitive in the job market.
+
+## Conclusion:
+
+While the TOD areas in D.C. have seen a considerable socio-economic growth over the past two decades, it is important to approach the future with a balanced perspective. By prioritizing inclusivity and sustainability, the city can ensure that the TOD areas remain diverse, and prosperous for all residents.

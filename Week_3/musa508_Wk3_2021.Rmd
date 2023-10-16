@@ -90,11 +90,14 @@ Let's explore these data sets by using commands like `glimpse()`
 What do you find? What kind of data are these?
 
 Make some simple ggplots with `geom_sf` by mapping the municipalities, the Lancaster County Boundary and the UGA and put them in a chunk right here:
+```{r}
+glimpse(uga)
+```
 
 ```{r first_maps}
 ggplot()+
   geom_sf(data = studyAreaTowns, aes(fill = MUNI))+
-  geom_sf(data = uga, fill = "transparent", color = "red")+
+  geom_sf(data = uga, fill = "transparent", color = "black")+
   mapTheme()
 ```
 
@@ -142,8 +145,8 @@ Here is a basic plot of the buggers that we have created.
 
 ```{r buffer_plot}
 ggplot() + 
-  geom_sf(data = bothBuffers, aes(fill = Legend)) +
-  scale_fill_manual(values = c("#F8766D", "#00BFC4")) + 
+  geom_sf(data = bothBuffers, aes(fill = Legend),lwd = 0) +
+  scale_fill_manual(values = c("#66DDDD", "#00CCFF")) + 
   labs(title = "1/8mi buffer inside & outside UGA") +
   mapTheme()
 ```
@@ -160,8 +163,24 @@ buffersAndTowns <-
 ```
 
 # Mapping Challenge 1
-
+```{r buffer_plot}
+ggplot() + 
+  geom_sf(data = buffersAndTowns, aes(fill = MUNI)) +
+  geom_sf_text(data = buffersAndTowns %>%  dplyr::filter(Legend == 'Inside'), aes(label = MUNI), size = 2) +
+  labs(title = "1/8mi buffer inside & outside UGA") +
+  mapTheme()
+```
 Find a way to map the inside and outside buffers nicely that distinguishes them from each other AND shows the municipalities they belong to. Try manipulating the colors (remember our palettes, and the `viridis` package? remember `scale_fill_manual`). Add geographic context. Add legends and titles and subtitles.
+
+```{r buffer_plot}
+ggplot() + 
+  geom_sf(data = uga)+
+  geom_sf(data = buffersAndTowns%>%dplyr::filter(Legend == 'Inside'), aes(fill = MUNI)) +
+  geom_sf(data = buffersAndTowns%>%dplyr::filter(Legend == 'Outside'), aes(fill = MUNI),alpha=0.5) +
+  geom_sf_text(data = buffersAndTowns %>%  group_by(MUNI)%>% summarise(), aes(label = MUNI), size = 2) +
+  labs(title = "1/8mi buffer inside & outside UGA") +
+  mapTheme()
+```
 
 Consider how you might label objects in your map using
 

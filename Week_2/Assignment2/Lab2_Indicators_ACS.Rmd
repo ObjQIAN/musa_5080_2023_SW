@@ -82,7 +82,9 @@ Notice this returns "long" data - let's examine it
 acs_variable_list.2000 <- load_variables(2000, #year
                                          "sf1", #decennial data
                                          cache = TRUE)
-
+acs_variable_list.2000x <- load_variables(2000, #year
+                                         "sf3", #decennial data
+                                         cache = TRUE)
 ```
 ```{r}
 acs_variable_list.2016 <- load_variables(2016, #year
@@ -92,10 +94,12 @@ acs_variable_list.2016 <- load_variables(2016, #year
 ```{r results='hide'}
 tracts00 <-  
   get_decennial(geography = "tract",
-          variables??? = c("H011002","B02001_002E",
-                        "B15001_050E","B15001_009E",
-                        "B19013_001E", "B25058_001E",
-                        "B06012_002E"), 
+                sumfile = c('sf3'),
+          variables= c('HCT009001',
+                        "H009002","PCT025050",
+                        "PCT025009",
+                        "P053001", "H056001",
+                        "PCT051002"), 
           year=2000, state=11,
           geometry=TRUE) %>% 
   st_transform('ESRI:102685')
@@ -135,7 +139,7 @@ We create a new data frame consisting only of population
 
 totalPop00 <-
   tracts00 %>%
-  filter(variable == "B25026_001")
+  filter(variable == "HCT009001")
 ```
 
 Ways to examine the data
@@ -164,29 +168,29 @@ version used in the text book so the results may appear different.)
 ```{r}
 A <- 
   ggplot() +
-  geom_sf(data = totalPop00, aes(fill = estimate)) +
+  geom_sf(data = totalPop00, aes(fill = value)) +
   theme(
     plot.title = element_text(size=22)
     )
 
 B <- 
   ggplot() +
-  geom_sf(data = totalPop00, aes(fill = q5(estimate))) +
+  geom_sf(data = totalPop00, aes(fill = q5(value))) +
   theme(plot.title = element_text(size=22)) 
 
 C <-
   ggplot() +
-  geom_sf(data = totalPop00, aes(fill = q5(estimate))) +
+  geom_sf(data = totalPop00, aes(fill = q5(value))) +
   scale_fill_manual(values = palette5,
-                    labels = qBr(totalPop00, "estimate"),
+                    labels = qBr(totalPop00, "value"),
                     name = "Total\nPopluation\n(Quintile Breaks)") +
   theme(plot.title = element_text(size=22))
 
 D <- 
   ggplot() +
-  geom_sf(data = totalPop00, aes(fill = q5(estimate))) +
+  geom_sf(data = totalPop00, aes(fill = q5(value))) +
   scale_fill_manual(values = palette5,
-                    labels = qBr(totalPop00, "estimate"),
+                    labels = qBr(totalPop00, "value"),
                     name = "Popluation\n(Quintile Breaks)") +
   labs(title = "Total Population", subtitle = "DC; 2000") +
   mapTheme() + 
@@ -207,15 +211,15 @@ frames.
 
 tracts00 <- 
   tracts00 %>%
-  dplyr::select( -NAME, -moe) %>%
-  spread(key = variable, value = estimate) %>%
-  rename(TotalPop = B25026_001, 
-         Whites = B02001_002,
-         FemaleBachelors = B15001_050, 
-         MaleBachelors = B15001_009,
-         MedHHInc = B19013_001, 
-         MedRent = B25058_001,
-         TotalPoverty = B06012_002)
+  dplyr::select( -NAME) %>%
+  spread(key = variable, value = value) %>%
+  rename(TotalPop = HCT009001, 
+         Whites = H009002,
+         FemaleBachelors = PCT025050, 
+         MaleBachelors = PCT025009,
+         MedHHInc = P053001, 
+         MedRent = H056001,
+         TotalPoverty = PCT051002)
 
 
 # Let's create new rate variables using mutate
@@ -242,13 +246,13 @@ split the use of `get_acs()` to download the data from the use of
 into one continuous sequence of code using the "pipe" operator `%>%`.
 
 ```{r results='hide'}
-tracts22 <- 
+tracts20 <- 
   get_acs(geography = "tract", 
           variables = c("B25026_001E","B02001_002E",
                         "B15001_050E","B15001_009E",
                         "B19013_001E","B25058_001E",
                         "B06012_002E"), 
-          year=2022, state=11, 
+          year=2020, state=11, 
           geometry=TRUE, output="wide") %>%
   st_transform('ESRI:102685') %>%
   rename(TotalPop = B25026_001E, 
@@ -283,18 +287,13 @@ Let's bring in DC's two main subway lines as spatial data and then `rbind` them 
 
 ```{r}
 
-el <- st_read("https://opendata.arcgis.com/datasets/8c6e2575c8ad46eb887e6bb35825e1a6_0.geojson")
-Broad_St <- st_read("https://opendata.arcgis.com/datasets/2e9037fd5bef406488ffe5bb67d21312_0.geojson")
+wm <- st_read("https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Transportation_Rail_Bus_WebMercator/MapServer/52/query?outFields=*&where=1%3D1&f=geojson")
 
-septaStops <- 
-  rbind(
-     el %>% 
-      mutate(Line = "El") %>%
-      dplyr::select(Station, Line),
-     Broad_St %>%
-      mutate(Line ="Broad_St") %>%
-      dplyr::select(Station, Line)) %>%
-  st_transform(st_crs(tracts00))  
+
+wmStops <- wm %>%
+ dplyr::select(NAME, LINE) %>%
+  st_transform(st_crs(tracts00))
+
 ```
 
 Let's visualize it
@@ -303,11 +302,10 @@ Let's visualize it
 
 ggplot() + 
   geom_sf(data=st_union(tracts00)) +
-  geom_sf(data=septaStops, 
-          aes(colour = Line), 
+  geom_sf(data=wmStops, 
+          aes(colour = LINE), 
           show.legend = "point", size= 2) +
-  scale_colour_manual(values = c("orange","blue")) +
-  labs(title="Septa Stops", 
+  labs(title="DCA Metro Stops", 
        subtitle="DC", 
        caption="Figure 2.5") +
   mapTheme()
@@ -325,11 +323,11 @@ We put them in the same data frame... why?
 
 ```{r}
 
-stopBuffer <- st_buffer(septaStops, 2640)
+stopBuffer <- st_buffer(wmStops, 2640)
 
-stopUnion <- st_union(st_buffer(septaStops, 2640))
+stopUnion <- st_union(st_buffer(wmStops, 2640))
 
-septaBuffers <- 
+wmBuffers <- 
   rbind(
      stopBuffer %>%
       mutate(Legend = "Buffer") %>%
@@ -347,8 +345,8 @@ geographic area. We accomplish this by using the `facet_wrap()`
 
 ```{r}
 ggplot() +
-  geom_sf(data=septaBuffers) +
-  geom_sf(data=septaStops, show.legend = "point") +
+  geom_sf(data=wmBuffers) +
+  geom_sf(data=wmStops, show.legend = "point") +
   facet_wrap(~Legend) + 
   labs(caption = "Figure 2.6") +
   mapTheme()
@@ -359,11 +357,11 @@ ggplot() +
 Consult the text to understand the difference between these three types
 of joins and discuss which is likely appropriate for this analysis
 
-Create an sf object with ONLY the unioned buffer from the `septaBuffers`
+Create an sf object with ONLY the unioned buffer from the `wmBuffers`
 spatial data frame.
 
 ```{r}
-buffer <- filter(septaBuffers, Legend=="Unioned Buffer")
+buffer <- filter(wmBuffers, Legend=="Unioned Buffer")
 ```
 
 ### Spatial Intersection of tracts and buffers
@@ -483,7 +481,7 @@ intersections <- rbind(clip, selection1, selectCentroids)
 
 ggplot() +
   geom_sf(data=intersections, aes(fill = TotalPop)) +
-  geom_sf(data=septaStops, show.legend = "point") +
+  geom_sf(data=wmStops, show.legend = "point") +
   scale_fill_viridis_c() +
   facet_wrap(~Selection_Type) + 
   mapTheme()
@@ -578,19 +576,19 @@ allTracts.Summary %>%
 ```{r}
 centerCity <-
   st_intersection(
-    st_buffer(filter(septaStops, Line == "El"), 2640) %>% st_union(),
-    st_buffer(filter(septaStops, Line == "Broad_St"), 2640) %>% st_union()) %>%
+    st_buffer(filter(wmStops, Line == "El"), 2640) %>% st_union(),
+    st_buffer(filter(wmStops, Line == "Broad_St"), 2640) %>% st_union()) %>%
   st_sf() %>%
   mutate(Submarket = "Center City")
 
 el <-
-  st_buffer(filter(septaStops, Line == "El"), 2640) %>% st_union() %>%
+  st_buffer(filter(wmStops, Line == "El"), 2640) %>% st_union() %>%
   st_sf() %>%
   st_difference(centerCity) %>%
   mutate(Submarket = "El")
 
 broad.st <-
-  st_buffer(filter(septaStops, Line == "Broad_St"), 2640) %>% st_union() %>%
+  st_buffer(filter(wmStops, Line == "Broad_St"), 2640) %>% st_union() %>%
   st_sf() %>%
   st_difference(centerCity) %>%
   mutate(Submarket = "Broad Street")
@@ -616,7 +614,7 @@ There is a more comprehensive tutorial on the usage of this function (and the bu
 
 ```{r}
 allTracts <- rbind(tracts20,tracts00)
-septa_MRB <- multipleRingBuffer(st_union(septaStops), 47520, 2640)
+septa_MRB <- multipleRingBuffer(st_union(wmStops), 47520, 2640)
 
 allTracts.rings <-
   st_join(st_centroid(dplyr::select(allTracts, GEOID, year)),
@@ -631,7 +629,7 @@ allTracts.rings <-
 
   ggplot() +
     geom_sf(data=septa_MRB) +
-    geom_sf(data=septaStops, size=1) +
+    geom_sf(data=wmStops, size=1) +
     geom_sf(data=st_union(tracts20), fill=NA, size=1.2) +
     labs(title="Half mile buffers") +
     mapTheme()
