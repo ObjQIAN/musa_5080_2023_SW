@@ -1,0 +1,554 @@
+---
+title: "People Based ML - Targeting A Housing Subsidy"
+author: "Shengqian Wang"
+date: "Nov.05,2023"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This analysis tries to address the deficiency for Emil City's home repair tax credit program managed by the Housing and Community Development (HCD). The HCD's analysis aims to change this status quo that the participation rate is low and utilize historical campaign data to develop a predictive model. The model aims to identify those more likely to respond to the program, thereby refining and focusing outreach efforts. 
+
+```{r load_packages, warning = FALSE, message=FALSE}
+options(scipen=10000000)
+
+library(tidyverse)
+library(kableExtra)
+library(caret)
+library(knitr) 
+library(pscl)
+library(plotROC)
+library(pROC)
+library(lubridate)
+```
+
+```{r load_data, cache = TRUE}
+palette5 <- c("#981FAC","#CB0F8B","#FF006A","#FE4C35","#FE9900")
+palette4 <- c("#981FAC","#FF006A","#FE4C35","#FE9900")
+palette2 <- c("#981FAC","#FF006A")
+housingSubsidy <- read.csv("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/DATA/Chapter6/housingSubsidy.csv")
+```
+
+## Data Exploration
+
+Creating plots  to explore how different numerical variables relate to homeowners' participation in the program.
+
+```{r exploratory_continuous, warning = FALSE, message=FALSE}
+housingSubsidy %>%
+  dplyr::select(previous, unemploy_rate, cons.price.idx,
+                cons.conf.idx, inflation_rate, campaign,
+                age, spent_on_repairs, y) %>%
+  gather(Variable, value, -y) %>%
+  ggplot(aes(y, value, fill = y)) +
+  geom_bar(position = "dodge", stat = "summary", fun = "mean") + 
+  facet_wrap(~Variable, scales = "free") +
+  scale_fill_manual(values = palette2) +
+   theme_light()+
+  labs(x = "y", y = "Value",
+    title = "Feature associations with the likelihood of participate",
+    subtitle = "(continous outcomes)") +
+  theme(legend.position = "none")
+```
+
+Plotting the curves for a better understanding of the distribution of different factors
+
+```{r exploratory_continuous_density, message = FALSE, warning = FALSE}
+housingSubsidy %>%
+    dplyr::select(previous, unemploy_rate, cons.price.idx,
+                cons.conf.idx, inflation_rate, campaign,
+                age, spent_on_repairs, pdays,y) %>%
+                gather(Variable, value, -y) %>%
+    ggplot() + 
+    geom_density(aes(value, color=y), fill = "transparent") + 
+    facet_wrap(~Variable, scales = "free") +
+    theme_light()+
+    scale_fill_manual(values = palette2) +
+    labs(title = "Feature distributions participate vs. no participate",
+         subtitle = "(continous outcomes)")
+```
+Creating plots to explore how different categorical variables relate to homeowners' participation in the program.
+```{r exploratory_binary, message = FALSE, warning = FALSE}
+housingSubsidy %>%
+    dplyr::select(y,taxLien,taxbill_in_phl,poutcome,mortgage ,month ,marital ,job,pdays,education,day_of_week,contact) %>%
+    gather(Variable, value, -y) %>%
+    count(Variable, value, y) %>%
+      ggplot(., aes(value, n, fill = y)) +   
+        geom_bar(position = "dodge", stat="identity") +
+        facet_wrap(~Variable,ncol = 4, scales="fixed") +
+        scale_fill_manual(values = palette2) +
+        labs(x="Click", y="Value",
+             title = "Feature associations with the likelihood of participation",
+             subtitle = "Categorical features") +
+         theme_light()+
+        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+## Create A Logistic Regression Model
+
+Then we remove outliers and splits the dataset to 65%-35% for model training and testing 
+
+```{r create_partition, warning = FALSE, message=FALSE}
+housingSubsidy <- subset(housingSubsidy,X != 3515) #remove the only yes for taxLien and edu
+housingSubsidy <- subset(housingSubsidy,X != 3927)
+set.seed(538)
+trainIndex <- createDataPartition(housingSubsidy$y, p = .65,
+                                  list = FALSE,
+                                  times = 1)
+housingSubsidyTrain <- housingSubsidy[ trainIndex,]
+housingSubsidyTest  <- housingSubsidy[-trainIndex,]
+
+```
+
+We run our model with the dependent variable `y_numeric` and we use most of our variables in the regression. (See `dplyr::select`).
+
+```{r run_model}
+
+housingSubsidyModel <- glm(y_numeric ~ .,
+                  data=housingSubsidyTrain %>% 
+                  dplyr::select( -X,-y,-day_of_week,-pdays,-previous,-inflation_rate),
+                  family="binomial" (link="logit"))
+
+summary(housingSubsidyModel)
+
+```
+
+## Discussion 3
+
+Observe the output of the first model, the result is not super satisfying. In the next part, several data structure modification were applied, and some new variables were created.
+
+```{r, warning = FALSE, message=FALSE}
+housingSubsidy <- housingSubsidy %>%
+  mutate(
+         cons.conf.idx.cat = case_when(cons.conf.idx < -35  ~ "conf(,35)",
+                                       cons.conf.idx >= -35  ~ "conf(35,)"),
+         inflation_rate.cat =  case_when(inflation_rate < 1.25  ~ "Low_inf",
+                                        inflation_rate >= 1.25 & inflation_rate <= 4.25  ~ "Medium_inf",
+                                        inflation_rate >= 4.25  ~ "High_inf"),
+         spent_on_repairs.cat =  case_when(spent_on_repairs < 5060  ~ "Low_repair",
+                                           spent_on_repairs >= 5060 & spent_on_repairs <= 5120  ~ "Medium_low_repair",
+                                           spent_on_repairs >= 5120 & spent_on_repairs <= 5168  ~ "Medium_high_repair",
+                                           spent_on_repairs >= 5168  ~ "High_repair"),
+         season = case_when(month %in% c('dec') ~ 'New Year',
+                            month %in% c('oct', 'nov') ~ 'Late fall',
+                            month %in% c('jun', 'jul') ~ 'summer',
+                            month %in% c('may', 'sep', 'aug','mar', 'apr') ~ 'high pay'),
+         job_cat = case_when(job %in% c('management','admin.') ~ 'white collar',
+                             job %in% c('self-employed') ~ 'self',
+                             job %in% c('student') ~ 'student',
+                             job %in% c('services', 'entrepreneur', 'blue-collar', 'technician') ~ 'other',
+                             job %in% c('retired', 'housemaid', 'unemployed', 'unknown') ~ 'no job'),
+         degree = case_when(education %in% c('university.degree','professional.course') ~ 'Univ',
+                            education %in% c('basic.9y','','basic.6y','high.school',
+                                             'basic.4y','illiterate','unknown') ~ 'other'),
+         pdays.cat = case_when(pdays < 30  ~ "month",
+                               pdays >= 30 & pdays < 999 ~  "long",
+                               pdays >= 999  ~ "no"
+                               ))
+```
+
+We made a same split to the new model and run our new model.
+
+```{r second_model}
+
+
+set.seed(538)
+trainIndex <- createDataPartition(housingSubsidy$y, p = .65,
+                                  list = FALSE,
+                                  times = 1)
+housingSubsidyTrain <- housingSubsidy[ trainIndex,]
+housingSubsidyTest  <- housingSubsidy[-trainIndex,]
+
+
+
+housingSubsidyModel2 <- glm(y_numeric ~ .,
+                  data=housingSubsidyTrain %>% 
+                  dplyr::select(-X,-y, - cons.conf.idx, -inflation_rate,
+                  -age, -spent_on_repairs,-education,-month,-job, -day_of_week,
+                  inflation_rate.cat,cons.conf.idx.cat,spent_on_repairs.cat,
+                  -marital,-taxLien,-taxbill_in_phl,-pdays,pdays.cat,
+                  season,job_cat,degree,-pdays),
+                  family="binomial" (link="logit"))
+
+summary(housingSubsidyModel2)
+
+```
+
+
+### Make Predictions
+
+We create a dataframe of predictions called `testProbs0` and `testProbs`. These predictions are the estimated probabilities of participation. The next step is to observe the difference between two models.
+
+
+```{r testProbs, warning = FALSE, message=FALSE}
+
+testProbs <- data.frame(Outcome = as.factor(housingSubsidyTest$y_numeric),
+                        Probs = predict(housingSubsidyModel2, housingSubsidyTest, type= "response"))
+```
+
+```{r testProbs0, warning = FALSE, message=FALSE}
+
+testProbs0 <- data.frame(Outcome = as.factor(housingSubsidyTest$y_numeric),
+                        Probs = predict(housingSubsidyModel, housingSubsidyTest, type= "response"))
+```
+
+
+
+### Confusion Matrix
+
+Then we calculates predicted outcomes based on  the threshold of 50%, creates a confusion matrix to evaluate the model's performance compared with the original model, and then visualizes it to help the audience understand the model's accuracy in predicting the correct outcomes.
+
+I used a visualization method borrowed from ('https://stackoverflow.com/questions/23891140/r-how-to-visualize-confusion-matrix-using-the-caret-package'), which made the visualization more efficient.
+
+```{r thresholds0, warning = FALSE, message=FALSE}
+testProbs0 <- 
+  testProbs0 %>%
+  mutate(predOutcome  = as.factor(ifelse(testProbs0$Probs > 0.5 , 1, 0)))
+
+testProbs <- 
+  testProbs %>%
+  mutate(predOutcome  = as.factor(ifelse(testProbs$Probs > 0.5 , 1, 0)))
+```
+
+
+```{r, warning = FALSE, message=FALSE}
+draw_confusion_matrix <- function(cm) {
+
+  layout(matrix(c(1,1,2)))
+  par(mar=c(2,2,2,2))
+  plot(c(100, 345), c(300, 450), type = "n", xlab="", ylab="", xaxt='n', yaxt='n')
+  title('CONFUSION MATRIX', cex.main=2)
+
+  # create the matrix 
+  rect(150, 430, 240, 370, col='#67b8b4')
+  text(195, 435, '0', cex=1.2)
+  rect(250, 430, 340, 370, col='#fee8ff')
+  text(295, 435, '1', cex=1.2)
+  text(125, 370, 'Predicted', cex=1.3, srt=90, font=2)
+  text(245, 450, 'Reference', cex=1.3, font=2)
+  rect(150, 305, 240, 365, col='#fee8ff')
+  rect(250, 305, 340, 365, col='#67b8b4')
+  text(140, 400, '0', cex=1.2, srt=90)
+  text(140, 335, '1', cex=1.2, srt=90)
+
+  # add in the cm results 
+  res <- as.numeric(cm$table)
+  text(195, 400, res[1], cex=1.6, font=2, col='white')
+  text(195, 335, res[2], cex=1.6, font=2, col='white')
+  text(295, 400, res[3], cex=1.6, font=2, col='white')
+  text(295, 335, res[4], cex=1.6, font=2, col='white')
+
+  # add in the specifics 
+  plot(c(100, 0), c(100, 0), type = "n", xlab="", ylab="", main = "DETAILS", xaxt='n', yaxt='n')
+  text(10, 85, names(cm$byClass[1]), cex=1.2, font=2)
+  text(10, 70, round(as.numeric(cm$byClass[1]), 3), cex=1.2)
+  text(30, 85, names(cm$byClass[2]), cex=1.2, font=2)
+  text(30, 70, round(as.numeric(cm$byClass[2]), 3), cex=1.2)
+  text(50, 85, names(cm$byClass[5]), cex=1.2, font=2)
+  text(50, 70, round(as.numeric(cm$byClass[5]), 3), cex=1.2)
+  text(70, 85, names(cm$byClass[6]), cex=1.2, font=2)
+  text(70, 70, round(as.numeric(cm$byClass[6]), 3), cex=1.2)
+  text(90, 85, names(cm$byClass[7]), cex=1.2, font=2)
+  text(90, 70, round(as.numeric(cm$byClass[7]), 3), cex=1.2)
+
+  # add in the accuracy information 
+  text(30, 35, names(cm$overall[1]), cex=1.5, font=2)
+  text(30, 20, round(as.numeric(cm$overall[1]), 3), cex=1.4)
+  text(70, 35, names(cm$overall[2]), cex=1.5, font=2)
+  text(70, 20, round(as.numeric(cm$overall[2]), 3), cex=1.4)
+}  
+```
+
+Here is the original confusion matrix.
+```{r confusion_matrix0, warning = FALSE, message=FALSE}
+cm0 <- caret::confusionMatrix(testProbs0$predOutcome, testProbs0$Outcome, 
+                       positive = "1")
+draw_confusion_matrix(cm0)
+```
+Here is the updated confusion matrix. Conpared to the original one, the result stayed almost the same, but there is also a slight rise of Sensitivity and Specificity, which indicate the True Positive result increased, which is important to the final revenue.
+
+```{r confusion_matrix}
+cm <- caret::confusionMatrix(testProbs$predOutcome, testProbs$Outcome, 
+                       positive = "1")
+draw_confusion_matrix(cm)
+```
+
+
+## Model performance comparison
+
+In the next part, we analyze and draw the new and old models respectively. We have produced distribution of probabilities, ROC Curve, and Linear Model Analysis, as well as goodness of fit. The new model, as we said before, slightly improves the output and sensitivity.
+
+```{r plot_testProbs0, warning = FALSE, message=FALSE}
+ggplot(testProbs0, aes(x = Probs, fill = as.factor(Outcome))) + 
+  geom_density() +
+      theme_light()+
+  facet_grid(Outcome ~ .) +
+  scale_fill_manual(values = palette2) +
+  labs(x = "Click", y = "Density of probabilities",
+       title = "Distribution of predicted probabilities by observed outcome") +
+  theme(strip.text.x = element_text(size = 18),
+        legend.position = "none")
+```
+
+
+```{r plot_testProbs, warning = FALSE, message=FALSE}
+ggplot(testProbs, aes(x = Probs, fill = as.factor(Outcome))) + 
+  geom_density() +
+      theme_light()+
+  facet_grid(Outcome ~ .) +
+  scale_fill_manual(values = palette2) +
+  labs(x = "Click", y = "Density of probabilities",
+       title = "Distribution of predicted probabilities by observed outcome") +
+  theme(strip.text.x = element_text(size = 18),
+        legend.position = "none")
+```
+
+## ROC Curve
+
+The ROC curve, gives us another visual "goodness of fit" metric. Although it is not very accurate, the shape of the ROC curve is relatively standard and shows a relatively good fit.
+
+
+```{r roc_curve0, warning = FALSE, message = FALSE}
+ggplot(testProbs, aes(d = as.numeric(Outcome), m = Probs)) +
+  geom_roc(n.cuts = 50, labels = FALSE, colour = "#FE9900") +
+  style_roc(theme = theme_grey) +
+  geom_abline(slope = 1, intercept = 0, size = 1.5, color = 'grey') +
+      theme_light()+
+  labs(title = "ROC Curve - Original model")
+```
+
+
+```{r roc_curve, warning = FALSE, message = FALSE}
+ggplot(testProbs, aes(d = as.numeric(Outcome), m = Probs)) +
+  geom_roc(n.cuts = 50, labels = FALSE, colour = "#FE9900") +
+  style_roc(theme = theme_grey) +
+  geom_abline(slope = 1, intercept = 0, size = 1.5, color = 'grey') +
+      theme_light()+
+  labs(title = "ROC Curve - Updated model")
+```
+
+
+```{r cv0, warning = FALSE, message=FALSE}
+ctrl <- trainControl(method = "cv", number = 100, classProbs=TRUE, summaryFunction=twoClassSummary)
+
+cvFit0 <- train(y ~ .,
+                  data=housingSubsidy %>% 
+                    dplyr::select(-X, -age,-day_of_week,-marital,-y_numeric,-inflation_rate), 
+                method="glm", family="binomial",
+                metric="ROC", trControl = ctrl)
+
+cvFit0
+```
+
+
+```{r cv, warning = FALSE, message=FALSE}
+ctrl <- trainControl(method = "cv", number = 100, classProbs=TRUE, summaryFunction=twoClassSummary)
+
+cvFit <- train(y ~ .,
+                  data=housingSubsidy %>% 
+                    dplyr::select(-X, -age,-day_of_week,-marital,-y_numeric,-inflation_rate), 
+                method="glm", family="binomial",
+                metric="ROC", trControl = ctrl)
+
+cvFit
+```
+
+```{r goodness_metrics, message = FALSE, warning = FALSE}
+dplyr::select(cvFit0$resample, -Resample) %>%
+  gather(metric, value) %>%
+  left_join(gather(cvFit0$results[2:4], metric, mean)) %>%
+  ggplot(aes(value)) + 
+    geom_histogram(bins=35, fill = "#FF006A") +
+    facet_wrap(~metric) +
+    geom_vline(aes(xintercept = mean), colour = "#981FAC", linetype = 3, size = 1.5) +
+    scale_x_continuous(limits = c(0, 1)) +
+    theme_light()+
+    labs(x="Goodness of Fit", y="Count", title="CV Goodness of Fit Metrics - Original",
+         subtitle = "Across-fold mean reprented as dotted lines")
+
+dplyr::select(cvFit$resample, -Resample) %>%
+  gather(metric, value) %>%
+  left_join(gather(cvFit$results[2:4], metric, mean)) %>%
+  ggplot(aes(value)) + 
+    geom_histogram(bins=35, fill = "#FF006A") +
+    facet_wrap(~metric) +
+    geom_vline(aes(xintercept = mean), colour = "#981FAC", linetype = 3, size = 1.5) +
+    scale_x_continuous(limits = c(0, 1)) +
+    theme_light()+
+    labs(x="Goodness of Fit", y="Count", title="CV Goodness of Fit Metrics",
+         subtitle = "Across-fold mean reprented as dotted lines")
+
+```
+
+
+## Cost-Benefit Calculation
+
+The cost/benefit for a True Positive (Marketing resources used, 25% accepted and get 10000 for ind and 56000 for surrounding, 75% not accepted and no money gained) is -(2850 + 5000 / 4) * Count + 66000 * Count;
+
+The cost/benefit for a True Negative (No marketing resources used and no money gained) is 0 * Count;
+
+The cost/benefit for a False Positive (Marketing resources used and no money gained) is (-2850) * Count;
+
+The cost/benefit for a False Negative (No marketing resources used and no money gained) is 0 * Count;
+
+
+```{r cost_benefit}
+cost_benefit_table <-
+   testProbs %>%
+      count(predOutcome, Outcome) %>%
+      summarize(True_Negative = sum(n[predOutcome==0 & Outcome==0]),
+                True_Positive = sum(n[predOutcome==1 & Outcome==1]),
+                False_Negative = sum(n[predOutcome==0 & Outcome==1]),
+                False_Positive = sum(n[predOutcome==1 & Outcome==0])) %>%
+       gather(Variable, Count) %>%
+       mutate(Revenue =
+               ifelse(Variable == "True_Negative", Count * 0,
+               ifelse(Variable == "True_Positive",(-(2850 + 5000 / 4) * Count + 66000 / 4 * Count),
+               ifelse(Variable == "False_Negative", Count * 0,
+               ifelse(Variable == "False_Positive", (-2850) * Count, 0))))) %>%
+    bind_cols(data.frame(Description = c(
+              "We correctly predicted not joining tax credit",
+              "We correctly predicted a tax credit",
+              "We predicted no participation and customer participated",
+              "We predicted a participation and customer did not participate")))
+
+kable(cost_benefit_table, caption = "Cost/Benefit Table", format = "html") %>%
+  kable_styling(position = "center") %>%
+  column_spec(1, bold = TRUE, color = "#67b8b4") %>%
+  row_spec(0, bold = TRUE, color = "#364d36", background = "#fee8ff")
+```
+
+
+## Optimize Thresholds
+
+The last step to tuning our model is to run it for each threshold value. We can then look at the confusion matrices for each threshold and choose the one that returns the most revenue.
+
+
+```{r iterate_threshold}
+iterateThresholds <- function(data) {
+  x = .01
+  all_prediction <- data.frame()
+  while (x <= 1) {
+  
+  this_prediction <-
+      testProbs %>%
+      mutate(predOutcome = ifelse(Probs > x, 1, 0)) %>%
+      count(predOutcome, Outcome) %>%
+      summarize(True_Negative = sum(n[predOutcome==0 & Outcome==0]),
+                True_Positive = sum(n[predOutcome==1 & Outcome==1]),
+                False_Negative = sum(n[predOutcome==0 & Outcome==1]),
+                False_Positive = sum(n[predOutcome==1 & Outcome==0])) %>%
+     gather(Variable, Count) %>%
+     mutate(Revenue =
+               ifelse(Variable == "True_Negative", Count * 0,
+               ifelse(Variable == "True_Positive",(-(2850 + 5000 / 4) * Count + 66000 / 4 * Count),
+               ifelse(Variable == "False_Negative", Count * 0,
+               ifelse(Variable == "False_Positive", (-2850) * Count, 0)))),
+            Threshold = x)
+  
+  all_prediction <- rbind(all_prediction, this_prediction)
+  x <- x + .01
+  }
+return(all_prediction)
+}
+```
+
+```{r}
+whichThreshold <- iterateThresholds(testProbs)
+whichThreshold %>%
+  ggplot(.,aes(Threshold, Revenue, colour = Variable)) +
+  geom_point() +
+  scale_colour_manual(values = palette5[c(5, 1:3)]) +    
+  labs(title = "Revenue by confusion matrix type and threshold",
+       y = "Revenue") +
+  theme_light() +
+  guides(colour=guide_legend(title = "Confusion Matrix")) 
+```
+
+```{r}
+whichThreshold_revenue <- 
+  whichThreshold %>% 
+    mutate(actualcredit = ifelse(Variable == "Count_TP", (Count * .25),
+                         ifelse(Variable == "Count_FN", Count, 0))) %>% 
+    group_by(Threshold) %>% 
+    summarize(Revenue = sum(Revenue),
+              actualcredit_Rate = sum(actualcredit) / sum(Count),
+              actualcredit_Revenue_Loss =  sum(actualcredit * 30),
+              Revenue_Next_Period = Revenue - actualcredit_Revenue_Loss) 
+
+whichThreshold_revenue[10:30,]
+```
+
+
+```{r, warning = FALSE, message=FALSE}
+credit_count <- whichThreshold %>% 
+  filter(Variable == "True_Positive") %>% 
+  mutate(Credit_Count = Count * 0.25) %>%
+  dplyr ::select(-Count) %>% 
+  group_by(Threshold) %>%
+  summarize(Credit_Count = sum(Credit_Count))
+
+credit_count %>% ggplot()+
+    theme_light()+#ylim(0,50)+ 
+  geom_line(aes(x = Threshold, y = Credit_Count))+
+  geom_vline(xintercept =  pull(arrange(credit_count, -Credit_Count)[1,1]))+
+    labs(title = "Model Revenues By Threshold For Test Sample",
+         subtitle = "Vertical Line Denotes Optimal Threshold")
+```
+
+
+```{r revenue_model, warning = FALSE, message=FALSE}
+whichThreshold_revenue <- 
+whichThreshold %>% 
+    group_by(Threshold) %>% 
+    summarize(Revenue = sum(Revenue))
+
+  ggplot(whichThreshold_revenue)+
+    theme_light()+ylim(-10000,700000)+ 
+  geom_line(aes(x = Threshold, y = Revenue))+
+  geom_vline(xintercept =  pull(arrange(whichThreshold_revenue, -Revenue)[1,1]))+
+    labs(title = "Model Revenues By Threshold For Test Sample",
+         subtitle = "Vertical Line Denotes Optimal Threshold")
+
+```
+
+```{r}
+#pull(arrange(credit_count, -Credit_Count)[1,1])
+Threshold_tbl <- 
+whichThreshold %>% 
+    group_by(Threshold) %>%   
+    summarize(
+     TP_count = Count[Variable == "True_Positive"],
+     total_rev = sum(Revenue)      
+     ) 
+#col1 = pull(arrange(credit_count, -Credit_Count)[1,1]) *100
+col2 = pull(arrange(whichThreshold_revenue, -Revenue)[1,1])*100
+newdata <- Threshold_tbl[c(50,col2),] %>%
+  mutate(description = c('This is the result from the threshold of 0.5',
+                         'This is the result from the threshold that has the largest credit count'))
+
+kable (newdata, caption = "Cost/Benefit Table for Threshold of 0.50, largest count and largest Revenue", format = "html") %>%
+  kable_styling(position = "center") %>%
+  column_spec(1, bold = TRUE, color = "#67b8b4") %>%
+  row_spec(0, bold = TRUE, color = "#364d36", background = "#fee8ff")
+
+
+```
+
+
+### Discussion : 
+
+About whether to put the model into production - it's important to assess its performance and the implications of its errors. Given the low sensitivity and high false negative rate, the model is currently not effective enough for real world operation. The huge number of homeowners who would benefit from the program but are not being identified by the model suggests a need for improvement before considering implementation.
+
+To enhance the model, incorporating more comprehensive data could provide a more accurate understanding of the market. This might include sentimental data, more economic indicators, or historical data on program uptake. Improved feature engineering could also be beneficial. The use of more advanced algorithms could improve prediction accuracy.
+
+About the marketing strategies, personalization of materials based on homeowner characteristics, such as recent home purchases, could potentially return a  better result. Low-cost methods like targeted social media campaigns could increase frequence and density of information without raising costs. Timing is also crucial; reaching out to homeowners at key moments, like shortly after buying a home, could result in higher response rates. These strategies with a feedback loop would allow for future machine learning and improvement.
+

@@ -1,0 +1,821 @@
+---
+title: 'Geospatial Risk Prediction'
+author: "Shengqian Wang"
+date: "11/05/2023"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+## Introduction
+
+
+```{r setup, include=FALSE, warning = FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE)
+
+library(tidyverse)
+library(sf)
+library(RSocrata)
+library(viridis)
+library(spatstat.explore)
+library(ggplot2)
+library(raster)
+library(spdep)
+library(FNN)
+library(grid)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(pals)
+library(tidyr)
+library(tidycensus)
+library(patchwork)
+library(classInt)   # for KDE and ML risk class intervals
+# functions
+root.dir = "https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/DATA/"
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
+```
+
+### Read in Data from Chicago
+
+The first step is to use the Socrata package for some data sets. We are focusing on batteries data and data that related.
+
+
+```{r,include=FALSE, warning = FALSE, message=FALSE}
+policeDistricts <- 
+  st_read("https://data.cityofchicago.org/api/geospatial/fthy-xz3r?method=export&format=GeoJSON") %>%
+  st_transform('ESRI:102271') %>%
+  dplyr::select(District = dist_num)
+  
+policeBeats <- 
+  st_read("https://data.cityofchicago.org/api/geospatial/aerh-rz74?method=export&format=GeoJSON") %>%
+  st_transform('ESRI:102271') %>%
+  dplyr::select(District = beat_num)
+
+bothPoliceUnits <- rbind(mutate(policeDistricts, Legend = "Police Districts"), 
+                         mutate(policeBeats, Legend = "Police Beats"))
+
+# Retrive batteries data from 2017
+batteries <- 
+  read.socrata("https://data.cityofchicago.org/Public-Safety/Crimes-2017/d62x-nvdr") %>% 
+    filter(Primary.Type == "BATTERY") %>%
+    mutate(x = gsub("[()]", "", Location)) %>%
+    separate(x,into= c("Y","X"), sep=",") %>%
+    mutate(X = as.numeric(X),Y = as.numeric(Y)) %>% 
+    dplyr::select(,-c(Date,Updated.On))%>% 
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant")%>%
+    st_transform('ESRI:102271') %>% 
+    distinct()
+
+chicagoBoundary <- 
+  st_read(file.path(root.dir,"/Chapter5/chicagoBoundary.geojson")) %>%
+  st_transform('ESRI:102271') 
+```
+
+Then we plot a map of all the batteries across Chicago to see the distribution - There are two major clusters and some policy or social issue may caused this result. 
+
+```{r fig.width=6, fig.height=4, warning = FALSE, message=FALSE}
+# uses grid.arrange to organize independent plots
+
+bat17_map <- ggplot() +
+  geom_sf(data = chicagoBoundary, fill = "#e0e2ff",color = '#A60049') +
+  geom_sf(data = batteries, colour="pink", size=0.1, show.legend = "point") +
+  labs(title= "Batteries, Chicago - 2017") +
+    theme_void()
+
+bat17_dens <- ggplot() +
+  geom_sf(data = chicagoBoundary, fill = "#e0e2ff",color = '#A64049') +
+  stat_density2d(data = data.frame(st_coordinates(batteries)), 
+                 aes(X, Y, fill = ..level.., alpha = ..level..),
+                 size = 0.01, bins = 40, geom = 'polygon') +
+  scale_fill_gradientn(colors = kovesi.isoluminant_cm_70_c39(50))+
+  scale_alpha(range = c(0.00, 0.35), guide = FALSE) +
+  labs(title = "Density of Batteries")+
+    theme_void()
+    
+    wrap_plots(bat17_map,bat17_dens)
+```
+
+Also, a `500m * 500m` fishnet is created for further analysis. We aggregate the crime data into fishnet and created a histogram of batteries Count showing the distribution pattern: most of the area have not received report of batteries, but some area has a lot. This result show the 
+
+```{r, warning = FALSE, message=FALSE}
+## using {sf} to create the grid
+## Note the `.[chicagoBoundary] %>% ` line. This is needed to clip the grid to our data
+fishnet <- 
+  st_make_grid(chicagoBoundary,
+               cellsize = 500, 
+               square = TRUE) %>%
+  .[chicagoBoundary] %>%            # fast way to select intersecting polygons
+  st_sf() %>%
+  mutate(uniqueID = 1:n())
+
+ggplot() +
+  geom_sf(data=fishnet, fill = "#e0e2ff",color = '#A64049') +
+  labs(title = "Fishnet of Chicago") +
+  theme_light()
+```
+
+### Aggregate points to the fishnet
+
+> How can we aggregate points into a fishnet grid?
+
+```{r, warning = FALSE, message=FALSE}
+## add a value of 1 to each crime, sum them with aggregate
+Battery_net <- 
+  dplyr::select(batteries) %>% 
+  mutate(countbatteries = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(countbatteries = replace_na(countbatteries, 0),
+         uniqueID = 1:n(),
+         cvID = sample(round(nrow(fishnet) / 24), 
+                       size=nrow(fishnet), replace = TRUE))
+
+ggplot() +
+  geom_sf(data = Battery_net, aes(fill = countbatteries), color = NA) +
+  scale_fill_gradientn(colors = kovesi.isoluminant_cm_70_c39(5))+
+  labs(title = "Count of Batteries for the fishnet") +
+  theme_light()
+
+# For demo. requires updated mapview package
+# xx <- mapview::mapview(crime_net, zcol = "countbatteries")
+# yy <- mapview::mapview(mutate(batteries, ID = seq(1:n())))
+# xx + yy
+```
+```{r, warning = FALSE, message=FALSE}
+ggplot(data = Battery_net) +
+  geom_histogram(aes(x = countbatteries), bins=30, fill = "#e0e2ff",color = '#A64049') + 
+  labs(title="Histogram of Batteries Count", x="Batteries Count", y="Number of Grid Cells") +
+  theme_light()
+```
+
+
+## Modeling Spatial Features
+
+We agggregated all the indicators and variables that may work for the analysis. They are：
+
+Waste on street can indicate the low management level of district - which could lead to poverty and crime.
+
+```{r, warning = FALSE, message=FALSE}
+Sanitation<-
+    read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Sanitation-Code-Complaints-No/rccf-5427") %>%
+    mutate(year = substr(Creation.Date,1,4)) %>%         
+    filter(year == "2017") %>%
+    dplyr::select(Y = Latitude, X = Longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Sanitation_Complaints")
+
+ggplot()+
+    geom_sf(data=fishnet,fill = "#e0e2ff",color = '#A64049') +
+    geom_sf(data=Sanitation,color = '#A64049') +
+    theme_light()
+```
+
+
+Proximity to Schools: Crime could increase due to the gathering of people - public school are perfect spots.
+
+```{r, warning = FALSE, message=FALSE}
+public_school <- 
+  read.socrata("https://data.cityofchicago.org/resource/d2h8-2upd.json") %>%
+  dplyr::select(Y = lat, X = long) %>%
+  na.omit() %>%
+  st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant")%>%
+  st_transform(st_crs(fishnet))  %>%
+  mutate(Legend = "Schools")
+
+
+
+
+ggplot()+
+    geom_sf(data=fishnet,fill = "#e0e2ff",color = '#A64049') +
+    geom_sf(data=public_school,color = '#A64049') +
+    theme_light()
+```
+
+Vacant Properties: Vacant properties or lots can be used for illicit activities, including drug transactions.
+
+```{r, warning = FALSE, message=FALSE}
+VCL <- 
+    read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Vacant-and-Abandoned-Building/7nii-7srd") %>%
+    mutate(year = substr(date_service_request_was_received,1,4)) %>%         
+    filter(year == "2017") %>%
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Vacant_bld")
+
+ggplot()+
+    geom_sf(data=fishnet,fill = "#e0e2ff",color = '#A64049') +
+    geom_sf(data=VCL,color = '#A64049') +
+    theme_light()
+```
+
+
+Proximity to Treatment Centers: While treatment centers aim to help individuals with substance use disorders, the areas around them might experience increased crime activities.
+
+
+```{r, warning = FALSE, message=FALSE}
+Treatment <-
+    read.socrata("https://data.cityofchicago.org/resource/232q-2cqr.json") %>%
+#    mutate(year = substr(creation_date,1,4)) %>% filter(year == "2017") %>%
+    dplyr::select(Y = physical_address.latitude, X = physical_address.longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Treatments")
+
+ggplot()+
+    geom_sf(data=fishnet,fill = "#e0e2ff",color = '#A64049') +
+    geom_sf(data=Treatment,color = '#A64049') +
+    theme_light()
+
+```
+
+Public Housing: The density and socio-economic factors associated with public housing might influence crime activity.
+
+```{r, warning = FALSE, message=FALSE}
+public_housing <- 
+  read.socrata("https://data.cityofchicago.org/resource/s6ha-ppgi.json") %>%
+  dplyr::select(Y = latitude, X = longitude) %>%
+  na.omit() %>%
+  st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant")%>%
+  st_transform(st_crs(fishnet)) %>%
+  mutate(Legend = "Public_housing")
+
+
+
+ggplot()+
+    geom_sf(data=fishnet,fill = "#e0e2ff",color = '#A64049') +
+    geom_sf(data=public_housing,color = '#A64049') +
+    theme_light()
+```
+
+Visibility : Areas with poor lighting, or lack of 'eyes on the street' might be more conducive to fighting.
+
+```{r, warning = FALSE, message=FALSE}
+light_off <- 
+  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Street-Lights-All-Out/zuxi-7xem") %>%
+    mutate(year = substr(creation_date,1,4)) %>% filter(year == "2017") %>%
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Lights_Out")
+
+ggplot()+
+    geom_sf(data=fishnet,fill = "#e0e2ff",color = '#A64049') +
+    geom_sf(data=light_off,color = '#A64049') +
+    theme_light()
+```
+
+Abandoned cars are also important indicators
+
+```{r, warning = FALSE, message=FALSE}
+## only pulling a single variable for our model to keep it simple
+## using Socrata again
+abandonCars <- 
+  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Abandoned-Vehicles/3c9v-pnva") %>%
+    mutate(year = substr(creation_date,1,4)) %>% filter(year == "2017") %>%
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Abandoned_Cars")
+
+ggplot()+
+    geom_sf(data=fishnet,fill = "#e0e2ff",color = '#A64049') +
+    geom_sf(data=abandonCars,color = '#A64049') +
+    theme_light()
+
+## Neighborhoods to use in LOOCV in a bit
+neighborhoods <- 
+  st_read("https://raw.githubusercontent.com/blackmad/neighborhoods/master/chicago.geojson") %>%
+  st_transform(st_crs(fishnet)) 
+
+```
+
+### Aggregating a feature to our fishnet
+
+
+
+```{r, warning = FALSE, message=FALSE}
+
+vars_net <-  
+  rbind(public_school, Sanitation, VCL, Treatment, public_housing,light_off , abandonCars) %>%
+  st_join(Battery_net, join=st_within) %>%
+  st_drop_geometry() %>%
+  group_by(uniqueID, Legend) %>%
+  summarize(count = n()) %>%
+  left_join(Battery_net, ., by = "uniqueID") %>%
+  spread(Legend, count, fill=0) %>%
+  dplyr::select(-`<NA>`) %>%
+  na.omit()%>%
+  ungroup()
+
+
+```
+
+## Nearest Neighbor Feature
+
+First, we made a map showing all the related indicator that have already been aggregated into the fishnet we designed.
+
+```{r, warning = FALSE, message=FALSE}
+#= convinience to reduce length of function names.
+st_c    <- st_coordinates
+st_coid <- st_centroid
+## create NN from abandoned cars
+vars_net <- vars_net %>%
+    mutate(Abandoned_Cars.nn = nn_function(st_c(st_coid(vars_net)), 
+                                           st_c(abandonCars),
+                                           k = 3))
+
+vars_net <- vars_net %>%
+    mutate(
+      public_school.nn = nn_function(st_c(st_coid(vars_net)),
+                                           st_c(public_school),
+                                           k = 3),      
+
+      Sanitation.nn = nn_function(st_c(st_coid(vars_net)),
+                                           st_c(Sanitation),
+                                           k = 3),  
+
+      Vacant_lot.nn = nn_function(st_c(st_coid(vars_net)),
+                                           st_c(VCL),
+                                           k = 3),  
+      
+      Treatment_center.nn = nn_function(st_c(st_coid(vars_net)),
+                                           st_c(Treatment),
+                                           k = 3),  
+      
+      public_housing.nn = nn_function(st_c(st_coid(vars_net)),
+                                           st_c(public_housing),
+                                           k = 3),  
+      
+      light_off.nn = nn_function(st_c(st_coid(vars_net)),
+                                           st_c(light_off),
+                                           k = 3),  
+      
+      abandonCars.nn = nn_function(st_c(st_coid(vars_net)),
+                                           st_c(abandonCars),
+                                           k = 3))
+
+
+
+
+```
+
+```{r, warning = FALSE, message=FALSE}
+
+# Identify all columns except the geometry one
+columns_to_plot <- setdiff(names(vars_net), "geometry")
+
+# Create a list to store plots
+plot_list <- list()
+
+
+
+# Loop through each column and create a plot
+for (col in columns_to_plot) {
+  p <- ggplot(vars_net) +
+    geom_sf(aes_string(fill = col), color = NA) + 
+    labs(title = paste("Plot of", col)) +
+    scale_fill_gradientn(colors = kovesi.isoluminant_cm_70_c39(5))+
+    theme_void()
+    
+  plot_list[[col]] <- p
+}
+
+```
+
+
+```{r, warning = FALSE, message=FALSE}
+wrap_plots(
+   c(plot_list[4:10]),
+  ncol = 3  ,
+  widths = 8,
+  heights = 15,
+) 
+```
+
+At the same time, here is a plot showing the distance to each type of the indicator.
+
+```{r, warning = FALSE, message=FALSE}
+
+wrap_plots(
+   c(plot_list[11:17]),
+  ncol = 3  ,
+  widths = 8,
+  heights = 15
+)
+```
+
+### Join in areal data
+
+Using spatial joins to join *centroids* of fishnets to polygon for neighborhoods and districts.
+
+```{r, warning = FALSE, message=FALSE}
+
+final_net <-
+  st_centroid(vars_net) %>%
+    st_join(dplyr::select(neighborhoods, name), by = "uniqueID") %>%
+    st_join(dplyr::select(policeDistricts, District), by = "uniqueID") %>%
+      st_drop_geometry() %>%
+      left_join(dplyr::select(vars_net, geometry, uniqueID)) %>%
+      st_sf() #%>%
+      #na.omit()
+
+# for live demo
+# mapview::mapview(final_net, zcol = "District")
+```
+
+### Local Moran's I for fishnet grid cells
+
+using {spdep} package to to build neighborhood weights and list to calculate local Moran's I.
+
+```{r, warning = FALSE, message=FALSE}
+## generates warnings from PROJ issues
+## {spdep} to make polygon to neighborhoods... 
+final_net.nb <- poly2nb(as_Spatial(final_net), queen=TRUE)
+## ... and neighborhoods to list of weigths
+final_net.weights <- nb2listw(final_net.nb, style="W", zero.policy=TRUE)
+
+# print(final_net.weights, zero.policy=TRUE)
+```
+
+```{r, warning = FALSE, message=FALSE}
+## see ?localmoran
+local_morans <- localmoran(final_net$countbatteries, final_net.weights, zero.policy=TRUE) %>% 
+  as.data.frame()
+
+# join local Moran's I results to fishnet
+final_net.localMorans <- 
+  cbind(local_morans, as.data.frame(final_net)) %>% 
+  st_sf() %>%
+  dplyr::select(batCount = countbatteries, 
+                Local_Morans_I = Ii, 
+                P_Value = `Pr(z != E(Ii))`) %>%
+  mutate(Significant_Hotspots = ifelse(P_Value <= 0.001, 1, 0)) %>%
+  gather(Variable, Value, -geometry)
+  
+```
+
+### Plotting local Moran's I results
+
+```{r, warning = FALSE, message=FALSE}
+## This is just for plotting
+vars <- unique(final_net.localMorans$Variable)
+varList <- list()
+
+for(i in vars){
+  varList[[i]] <- 
+    ggplot() +
+      geom_sf(data = filter(final_net.localMorans, Variable == i), 
+              aes(fill = Value), colour=NA) +
+      scale_fill_gradientn(name="", colors = kovesi.isoluminant_cm_70_c39(5))+
+      labs(title=i) +
+      mapTheme(title_size = 14) + theme(legend.position="bottom")}
+
+do.call(grid.arrange,c(varList, ncol = 4, top = "Local Morans I statistics, batteries"))
+```
+
+## Distance to Hot spot
+
+Using NN distance to a hot spot location
+
+```{r, warning = FALSE, message=FALSE}
+# generates warning from NN
+final_net <-
+  final_net %>% 
+  mutate(bat.isSig = 
+           ifelse(localmoran(final_net$countbatteries, 
+                             final_net.weights)[,5] <= 0.0000001, 1, 0)) %>%
+  mutate(bat.isSig.dist = 
+           nn_function(st_coordinates(st_centroid(final_net)),
+                                      st_coordinates(st_centroid(
+                                            filter(final_net, bat.isSig == 1))), 1))
+## What does k = 1 represent?
+```
+
+### Plot NN distance to hot spot
+
+```{r, warning = FALSE, message=FALSE}
+ggplot() +
+      geom_sf(data = final_net, aes(fill=bat.isSig.dist), colour=NA) +
+      scale_fill_gradientn(name="NN Distance", colors = kovesi.isoluminant_cm_70_c39(5))+
+      labs(title="batteries") +
+      mapTheme()
+```
+
+Plotting the relationship between Batteries and risk - Batteries count as a function of risk factors
+
+```{r, warning = FALSE, message=FALSE}
+correlation.long <-
+  st_drop_geometry(final_net) %>%
+    dplyr::select(-uniqueID, -cvID, -name, -District) %>%
+    gather(Variable, Value, -countbatteries)
+
+correlation.cor <-
+  correlation.long %>%
+    group_by(Variable) %>%
+    summarize(correlation = cor(Value, countbatteries, use = "complete.obs"))
+    
+ggplot(correlation.long, aes(Value, countbatteries)) +
+  geom_point(size = 0.1) +
+  geom_text(data = correlation.cor, aes(label = paste("r =", round(correlation, 2))),
+            x=-Inf, y=Inf, vjust = 1.5, hjust = -.1) +
+  geom_smooth(method = "lm", se = FALSE, colour = "black") +
+  facet_wrap(~Variable, ncol = 5, scales = "fixed") +
+  labs(title = "Batteries count as a function of risk factors") +
+  plotTheme()
+```
+
+
+
+## Modeling and CV
+
+For this part, we used a cross-validation function crossValidate to handle both random k-fold and spatial leave-one-group-out cross-validation (LOGO-CV). This dual approach enables the assessment of model accuracy while accounting for spatial factor in our crime data that have spatial bias.
+
+```{r ,results='hide', warning = FALSE, message=FALSE}
+#replace NA value
+final_net <- final_net%>% replace_na(list( name = "unknown", District = '99'))
+# View(crossValidate)
+
+## define the variables we want
+reg.vars <- c( 'public_school.nn' , 'Sanitation.nn' , 'Vacant_lot.nn' , 'Treatment_center.nn' , 'public_housing.nn' , 'light_off.nn' , 'abandonCars.nn')
+
+reg.ss.vars <- c( 'public_school.nn' , 'Sanitation.nn' , 'Vacant_lot.nn' , 'Treatment_center.nn' , 'public_housing.nn' , 'light_off.nn' , 'abandonCars.nn', "bat.isSig", "bat.isSig.dist")
+
+## RUN REGRESSIONS
+
+reg.cv <- crossValidate(
+  dataset = final_net,
+  id = "cvID",
+  dependentVariable = "countbatteries",
+  indVariables = reg.vars) %>%
+    dplyr::select(cvID = cvID, countbatteries, Prediction, geometry)
+
+reg.ss.cv <- crossValidate(
+  dataset = final_net,
+  id = "cvID",
+  dependentVariable = "countbatteries",
+  indVariables = reg.ss.vars) %>%
+    dplyr::select(cvID = cvID, countbatteries, Prediction, geometry)
+  
+reg.spatialCV <- crossValidate(
+  dataset = final_net,
+  id = "name",
+  dependentVariable = "countbatteries",
+  indVariables = reg.vars) %>%
+    dplyr::select(cvID = name, countbatteries, Prediction, geometry)
+
+reg.ss.spatialCV <- crossValidate(
+  dataset = final_net,
+  id = "name",
+  dependentVariable = "countbatteries",
+  indVariables = reg.ss.vars) %>%
+    dplyr::select(cvID = name, countbatteries, Prediction, geometry)
+```
+
+In this part, WE visualize the distribution of mean absolute error (MAE) across the different model specifications, providing insights into each model's predictive capability. 
+
+Following this, I also assesses the errors' relationship with race, using 2017 census tract race data, to understand if the model's errors distribute unevenly across different racial contexts. From the result - we can see a huge difference - there is a significant bias towards white community.
+ 
+```{r, warning = FALSE, message=FALSE,results='hide'}
+reg.summary <- 
+  rbind(
+    mutate(reg.cv,           Error = Prediction - countbatteries,
+                             Regression = "Random k-fold CV: Just Risk Factors"),
+                             
+    mutate(reg.ss.cv,        Error = Prediction - countbatteries,
+                             Regression = "Random k-fold CV: Spatial Process"),
+    
+    mutate(reg.spatialCV,    Error = Prediction - countbatteries,
+                             Regression = "Spatial LOGO-CV: Just Risk Factors"),
+                             
+    mutate(reg.ss.spatialCV, Error = Prediction - countbatteries,
+                             Regression = "Spatial LOGO-CV: Spatial Process")) %>%
+    st_sf() 
+
+
+error_by_reg_and_fold <- 
+  reg.summary %>%
+    group_by(Regression, cvID) %>% 
+    summarize(Mean_Error = mean(Prediction - countbatteries, na.rm = T),
+              MAE = mean(abs(Mean_Error), na.rm = T),
+              SD_MAE = sd(abs(Mean_Error), na.rm = T)) %>%
+  ungroup()
+
+error_by_reg_and_fold %>%
+  ggplot(aes(MAE)) + 
+    geom_histogram(bins = 30, colour="#cc2b6e", fill = "#f9d9ff") +
+    facet_wrap(~Regression) +  
+    geom_vline(xintercept = 0) + scale_x_continuous(breaks = seq(0, 8, by = 1)) + 
+    labs(title="Distribution of MAE", subtitle = "k-fold cross validation vs. LOGO-CV",
+         x="Mean Absolute Error", y="Count") +
+    theme_light()
+```
+
+```{r, warning = FALSE, message=FALSE}
+tracts17 <- 
+  get_acs(geography = "tract", 
+          variables = c("B02001_001E", "B02001_002E", "B02001_003E"), 
+          year=2017, state=17,county=031,  
+          geometry=TRUE, output="wide") %>%
+  st_transform('ESRI:102271') %>%
+  rename(total = B02001_001E,white = B02001_002E,black = B02001_003E) %>%
+ # dplyr::select(-NAME, -starts_with("B")) %>%
+  mutate(
+    Other = total - white - black,
+    pctOther = ifelse(total > 0, Other / total,0),
+    pctWhite = ifelse(total > 0, white / total,0),
+    pctBlack = ifelse(total > 0, black / total,0),
+    Majwhite = ifelse(total > 0, white>black & white>Other,0),
+    Majblack = ifelse(total > 0, black>Other & black>white,0),
+    Majother = ifelse(total > 0, Other>black & Other>white,0),
+    Major = ifelse(white >= black &  white>Other, 'white',
+                        ifelse(black>Other & black>white, 'black', 'other')),
+         year = "2017") %>%
+  dplyr::select(-white, -black, -Other) 
+
+tracts17 %>%
+  ggplot() + 
+  geom_sf(aes(fill = Major), color = NA) + 
+    scale_fill_viridis(discrete = TRUE) +
+    labs(title="Distribution of Race",
+         subtitle="2017 Majority race by census tract") +
+     theme_light()
+```
+
+```{r, warning = FALSE, message=FALSE}
+fishnet_race <-st_centroid(fishnet)%>% 
+  st_intersection(tracts17) %>%
+  st_intersection(reg.summary)
+race_tbl <- fishnet_race %>%
+  group_by(Major,Regression) %>%
+  summarize(
+          Mean_Error = mean(Prediction - countbatteries, na.rm = T),
+          MAE = mean(abs(Mean_Error), na.rm = T))%>%
+  dplyr :: select(-Mean_Error)%>%
+    st_drop_geometry() %>%
+    pivot_wider(names_from = Regression, values_from = MAE, id_cols = Major)
+kable (race_tbl, caption = "MAE distribution by race and model", format = "html") %>%
+  kable_styling(position = "center") %>%
+  column_spec(1, bold = TRUE, color = "#67b8b4") %>%
+  row_spec(0, bold = TRUE, color = "#364d36", background = "#fee8ff")
+```
+
+
+### Calculating Errors across space
+
+Then we focused on the spatial analysis of battery incident data, using kernel density estimation (KDE) to visualize the intensity of events across different areas. The code converts battery incident locations into a point pattern, which is then analyzed using KDE with varying radius —1000, 1500, and 2000 feet. This approach helps identify areas with higher concentrations of incidents, which is good for understanding spatial risk factors.
+
+```{r, warning = FALSE, message=FALSE}
+# demo of kernel width
+bat_ppp <- as.ppp(st_coordinates(batteries), W = st_bbox(final_net))
+bat_KD.1000 <- spatstat.explore::density.ppp(bat_ppp, 1000)
+bat_KD.1500 <- spatstat.explore::density.ppp(bat_ppp, 1500)
+bat_KD.2000 <- spatstat.explore::density.ppp(bat_ppp, 2000)
+bat_KD.df <- rbind(
+  mutate(data.frame(rasterToPoints(mask(raster(bat_KD.1000), as(neighborhoods, 'Spatial')))), Legend = "1000 Ft."),
+  mutate(data.frame(rasterToPoints(mask(raster(bat_KD.1500), as(neighborhoods, 'Spatial')))), Legend = "1500 Ft."),
+  mutate(data.frame(rasterToPoints(mask(raster(bat_KD.2000), as(neighborhoods, 'Spatial')))), Legend = "2000 Ft.")) 
+
+bat_KD.df$Legend <- factor(bat_KD.df$Legend, levels = c("1000 Ft.", "1500 Ft.", "2000 Ft."))
+
+ggplot(data=bat_KD.df, aes(x=x, y=y)) +
+  geom_raster(aes(fill=layer)) + 
+  facet_wrap(~Legend) +
+  coord_sf(crs=st_crs(final_net)) + 
+  scale_fill_gradientn(colors = kovesi.isoluminant_cm_70_c39(5), name = 'Density')+
+  labs(title = "Kernel density with 3 different search radii") +
+  theme_light()
+```
+
+```{r, warning = FALSE, message=FALSE}
+
+as.data.frame(bat_KD.1000) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(final_net)) %>%
+  aggregate(., final_net, mean) %>%
+   ggplot() +
+     geom_sf(aes(fill=value)) +
+     geom_sf(data = sample_n(batteries, 1500), size = .5) +
+     scale_fill_gradientn(colors = kovesi.isoluminant_cm_70_c39(5), name = 'Density')+
+     labs(title = "Kernel density of 2017 batteries") +
+     theme_light()
+```
+
+
+
+## Get 2018 battery crime data
+
+Let's see how our model performed relative to KD on the following year's data.
+
+```{r, warning = FALSE, message=FALSE}
+batteries18 <- 
+  read.socrata("https://data.cityofchicago.org/Public-Safety/Crimes-2018/3i3m-jwuy") %>% 
+  filter(Primary.Type == "BATTERY") %>%
+  mutate(x = gsub("[()]", "", Location)) %>%
+  separate(x,into= c("Y","X"), sep=",") %>%
+  mutate(X = as.numeric(X),
+         Y = as.numeric(Y)) %>% 
+  dplyr::select(,-c(Date,Updated.On))%>% 
+  na.omit %>%
+  st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+  st_transform('ESRI:102271') %>% 
+  distinct() %>%
+  .[fishnet,]
+```
+
+```{r}
+
+bat_KDE_sum <- as.data.frame(bat_KD.1000) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(final_net)) %>%
+  aggregate(., final_net, mean) 
+kde_breaks <- classIntervals(bat_KDE_sum$value, 
+                             n = 5, "fisher")
+bat_KDE_sf <- bat_KDE_sum %>%
+  mutate(label = "Kernel Density",
+         Risk_Category = classInt::findCols(kde_breaks),
+         Risk_Category = case_when(
+           Risk_Category == 5 ~ "5th",
+           Risk_Category == 4 ~ "4th",
+           Risk_Category == 3 ~ "3rd",
+           Risk_Category == 2 ~ "2nd",
+           Risk_Category == 1 ~ "1st")) %>%
+  cbind(
+    aggregate(
+      dplyr::select(batteries18) %>% mutate(batCount = 1), ., sum) %>%
+    mutate(batCount = replace_na(batCount, 0))) %>%
+  dplyr::select(label, Risk_Category, batCount)
+```
+
+
+
+```{r}
+ml_breaks <- classIntervals(reg.ss.spatialCV$Prediction, 
+                             n = 5, "fisher")
+bat_risk_sf <-
+  reg.ss.spatialCV %>%
+  mutate(label = "Risk Predictions",
+         Risk_Category =classInt::findCols(ml_breaks),
+         Risk_Category = case_when(
+           Risk_Category == 5 ~ "5th",
+           Risk_Category == 4 ~ "4th",
+           Risk_Category == 3 ~ "3rd",
+           Risk_Category == 2 ~ "2nd",
+           Risk_Category == 1 ~ "1st")) %>%
+  cbind(
+    aggregate(
+      dplyr::select(batteries18) %>% mutate(batCount = 1), ., sum) %>%
+      mutate(batCount = replace_na(batCount, 0))) %>%
+  dplyr::select(label,Risk_Category, batCount)
+```
+
+The result is pretty good, especially considering it successfully predicted the hotspot of all 2018 major crime zone.
+
+```{r}
+rbind(bat_KDE_sf, bat_risk_sf) %>%
+  na.omit() %>%
+  gather(Variable, Value, -label, -Risk_Category, -geometry) %>%
+  ggplot() +
+    geom_sf(aes(fill = Risk_Category), colour = NA) +
+    geom_sf(data = sample_n(batteries18, 3000), size = .5, colour = "black") +
+    facet_wrap(~label, ) +
+    scale_fill_viridis(discrete = TRUE) +
+    labs(title="Comparison of Kernel Density and Risk Predictions",
+         subtitle="2018 batteries risk predictions KDE; 2018 batteries") +
+     theme_light()
+```
+Analysing the performance, the model predicted the correct trendancy, but did not expected the size of major crime type  -this may because some relevant indicator averaged this model.
+
+```{r}
+rbind(bat_KDE_sf, bat_risk_sf) %>%
+  st_drop_geometry() %>%
+  na.omit() %>%
+  gather(Variable, Value, -label, -Risk_Category) %>%
+  group_by(label, Risk_Category) %>%
+  summarize(countbatteries = sum(Value)) %>%
+  ungroup() %>%
+  group_by(label) %>%
+  mutate(Pcnt_of_test_set_crimes = countbatteries / sum(countbatteries)) %>%
+    ggplot(aes(Risk_Category,Pcnt_of_test_set_crimes)) +
+      geom_bar(aes(fill=label), position="dodge", stat="identity") +
+      scale_fill_viridis(discrete = TRUE, name = "Model") +
+      labs(title = "Risk prediction vs. Kernel density, 2018 batteries",
+           y = "% of Test Set batteries (per model)",
+           x = "Risk Category") +
+  theme_bw() +
+      theme(axis.text.x = element_text(angle = 45, vjust = 0.5))
+```
+
+## Discussion:
+
+The geo risk model has shown pretty promising results, indicating a good understanding of the spatial components of Batteries. However, before recommending its implementation, it is crucial to fit need for further refinement. This includes expanding types and amount of data inputs, enhancing feature engineering to capture more nuanced patterns, and establishing rigorous protocols for future data verification to maintain and improve the model's accuracy. Keep monitoring and updating with new data will be imperative to ensure the model adapts to changing patterns over time.
+
+Given the model’s current performance and potential for improvement, I would cautiously recommend its deployment. It could be used as a supplementary tool for the police department, provided it is accompanied by guidelines to prevent misuse and regular evaluation against fresh data. This cautious approach allows for the practical benefits of the model to be leveraged while also prioritizing ethical considerations.
